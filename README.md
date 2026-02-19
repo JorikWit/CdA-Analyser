@@ -86,7 +86,7 @@ To create a standalone executable for the CdA Analyser:
 ```powershell
 .\.venv\Scripts\Activate.ps1
 cd src
-python -m PyInstaller --onefile --icon=icons/logo_blue.ico --name="CdA-Analyser" --noupx --add-data "icons;icons" main.py
+python -m PyInstaller --onefile --windowed --icon=icons/logo_blue.ico --name="CdA-Analyser" --noupx --add-data "icons;icons" main.py
 ```
 
 **Multi-file (faster)**
@@ -94,7 +94,7 @@ python -m PyInstaller --onefile --icon=icons/logo_blue.ico --name="CdA-Analyser"
 ```powershell
 .\.venv\Scripts\Activate.ps1
 cd src
-python -m PyInstaller --onedir --icon=icons/logo_blue.ico --name="CdA-Analyser" --noupx --add-data "icons;icons" main.py
+python -m PyInstaller --onedir --windowed --icon=icons/logo_blue.ico --name="CdA-Analyser" --noupx --add-data "icons;icons" main.py
 ```
 
 ---
