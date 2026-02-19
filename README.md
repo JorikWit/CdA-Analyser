@@ -9,7 +9,8 @@ The CdA Analyser is a Python-based application designed to help cyclists and aer
 To create a standalone executable for the CdA Analyser, use the following command:
 
 ```bash
-python -m PyInstaller --onefile --windowed --icon=logo_blue.ico --name="cda_analyser" main.py
+cd src
+python -m PyInstaller --onefile --windowed --icon=icons/logo_blue.ico --name="CdA-Analyser" --noupx --add-data "icons;icons" main.py
 ```
 or faster bigger multi file alternativ:
 
@@ -22,7 +23,7 @@ python -m PyInstaller --onedir --windowed --icon=icons/logo_blue.ico --name="CdA
 
 *   **Units:** Change units to km/h instead of m/s for speed display.
 *   **Stability:** Investigate and resolve potential crashes when re-analyzing dataset more then ones. possibly related to weather data caching?
-*   **User Interface:** Add a slider for `wind_effect_factor` and make it trigger a re-analysis.
+*   ~~**User Interface:** Add a slider for `wind_effect_factor` and make it trigger a re-analysis.~~
 *   **Add Guide:** Write down how the program works and what the parameters do.
 
 ## Dependencies
