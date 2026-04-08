@@ -8,6 +8,7 @@ import argparse
 import logging
 import threading
 import faulthandler
+import tempfile
 from pathlib import Path
 import traceback
 
@@ -30,7 +31,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QRect, QByteArray
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QBrush, QLinearGradient, QColor
-from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings
 
 # Local module imports
 from icon import LOGO_BASE64
@@ -309,6 +310,7 @@ class GUIInterface(QMainWindow):
         self.sim_figure = None
         self.sim_canvas = None
         self.worker = None
+        self._map_html_path = None
 
         self.home_directory = os.path.expanduser('~')
         self.downloads_path = os.path.join(self.home_directory, 'Downloads')
@@ -561,6 +563,7 @@ class GUIInterface(QMainWindow):
 
         self.map_webview = QWebEngineView()
         self.map_webview.setMinimumHeight(400)
+        self.map_webview.settings().setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, True)
         map_layout.addWidget(self.map_webview)
 
         self.map_refresh_btn = QPushButton("Generate / Refresh Map")
@@ -1040,7 +1043,10 @@ class GUIInterface(QMainWindow):
 
         if s:
             t.append(f"Total segments analyzed: {s['total_segments']}")
-            t.append(f"Weighted CdA: {s['weighted_cda']:.4f}")
+            keep_percent = s.get('keep_percent', self.analyzer.parameters.get('cda_keep_percent', 80.0))
+            kept_used = s.get('kept_segments_used', s['total_segments'])
+            t.append(f"Weighted CdA (all segments): {s.get('weighted_cda_all', s['weighted_cda']):.4f}")
+            t.append(f"Weighted CdA ({keep_percent:.0f}%): {s.get('weighted_cda_kept', s['weighted_cda']):.4f} [{kept_used} segments]")
             t.append(f"Average CdA: {s['average_cda']:.4f}")
             t.append(f"CdA standard deviation: {s['cda_std']:.4f}")
             if s.get('wind_coefficients'):
@@ -1107,7 +1113,7 @@ class GUIInterface(QMainWindow):
                 idx = self.segment_data_map[seg_id]
                 if not idx:
                     continue
-                data = self.ride_data.iloc[idx]
+                data = self.ride_data.iloc[idx].dropna(subset=['latitude', 'longitude'])
                 coords = list(zip(data['latitude'], data['longitude']))
                 if len(coords) < 2:
                     continue
@@ -1129,9 +1135,11 @@ class GUIInterface(QMainWindow):
                     {seg_id}</div>""")
                 ).add_to(m)
 
-            # Save to BytesIO (in-memory), then load into QWebEngineView
-            html_bytes = m.get_root().render().encode('utf-8')
-            self.map_webview.setHtml(html_bytes.decode('utf-8'), QUrl("about:blank"))
+            # Loading big folium output via setHtml can fail silently in WebEngine.
+            # Save to a temp html file and load by URL for robust rendering.
+            self._map_html_path = os.path.join(tempfile.gettempdir(), "cda_analyzer_map.html")
+            m.save(self._map_html_path)
+            self.map_webview.setUrl(QUrl.fromLocalFile(self._map_html_path))
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error generating map: {str(e)}")
@@ -1256,14 +1264,19 @@ class GUIInterface(QMainWindow):
                             fontsize=6, alpha=0.8)
             self.current_figure.colorbar(sc, ax=ax6).set_label('Air Speed (m/s)', fontsize=8)
 
-            # Summary text
-            weighted_cda = np.average(cda_vals, weights=[s['distance'] for s in segments])
+            # Summary text (show both all-segment and keep-x% weighted CdA)
+            weighted_metrics = self.analyzer._calculate_weighted_cda_metrics(segments)
+            weighted_all = weighted_metrics['weighted_cda_all']
+            weighted_kept = weighted_metrics['weighted_cda_kept']
+            keep_percent = weighted_metrics['keep_percent']
+            kept_used = weighted_metrics['kept_segments_used']
             avg_cda = np.mean(cda_vals)
             std_cda = np.std(cda_vals)
             total_distance = sum(s['distance'] for s in segments) / 1000
             summary = (
-                f"Weighted CdA: {weighted_cda:.3f}\n"
-                f"Average CdA: {avg_cda:.3f}\n"
+                #f"Weighted CdA all: {weighted_all:.3f}\n"
+                f"Weighted CdA {keep_percent:.0f}%: {weighted_kept:.3f}\n"
+                #f"Average CdA: {avg_cda:.3f}\n"
                 f"CdA Std Dev: {std_cda:.3f}\n"
                 f"Total Distance: {total_distance:.1f} km"
             )
@@ -1452,6 +1465,13 @@ class GUIInterface(QMainWindow):
         cda_values = [s['cda'] for s in self.simulation_results]
 
         if cda_values:
+            weighted_metrics = self.analyzer._calculate_weighted_cda_metrics(self.simulation_results)
+            weighted_all = weighted_metrics['weighted_cda_all']
+            weighted_kept = weighted_metrics['weighted_cda_kept']
+            keep_percent = weighted_metrics['keep_percent']
+            kept_used = weighted_metrics['kept_segments_used']
+            t.append(f"Weighted CdA (all segments): {weighted_all:.4f}")
+            t.append(f"Weighted CdA ({keep_percent:.0f}%): {weighted_kept:.4f} [{kept_used} segments]")
             t.append(f"Average CdA: {np.mean(cda_values):.4f}")
             t.append(f"CdA standard deviation: {np.std(cda_values):.4f}")
             t.append(f"Min CdA: {np.min(cda_values):.4f}")
@@ -1579,14 +1599,19 @@ class GUIInterface(QMainWindow):
                             fontsize=6, alpha=0.8)
             self.sim_figure.colorbar(sc, ax=ax6)
 
-            # Summary text
-            weighted_cda = np.average(cda_vals, weights=[s['distance'] for s in segments])
+            # Summary text (show both all-segment and keep-x% weighted CdA)
+            weighted_metrics = self.analyzer._calculate_weighted_cda_metrics(segments)
+            weighted_all = weighted_metrics['weighted_cda_all']
+            weighted_kept = weighted_metrics['weighted_cda_kept']
+            keep_percent = weighted_metrics['keep_percent']
+            kept_used = weighted_metrics['kept_segments_used']
             avg_cda = np.mean(cda_vals)
             std_cda = np.std(cda_vals)
             total_distance = sum(s['distance'] for s in segments) / 1000
             summary = (
-                f"Weighted CdA: {weighted_cda:.3f}\n"
-                f"Average CdA: {avg_cda:.3f}\n"
+                #f"Weighted CdA all: {weighted_all:.3f}\n"
+                f"Weighted CdA ({keep_percent:.0f}%): {weighted_kept:.3f}\n"
+                #f"Average CdA: {avg_cda:.3f}\n"
                 f"CdA Std Dev: {std_cda:.3f}\n"
                 f"Total Distance: {total_distance:.1f} km"
             )

@@ -129,7 +129,10 @@ def _display_results(results):
     summary = results['summary']
     if summary:
         print(f"Total segments analyzed: {summary['total_segments']}")
-        print(f"Weighted CdA: {summary['weighted_cda']:.4f}")
+        keep_percent = summary.get('keep_percent', results.get('parameters', {}).get('cda_keep_percent', 80.0))
+        kept_used = summary.get('kept_segments_used', summary['total_segments'])
+        print(f"Weighted CdA (all segments): {summary.get('weighted_cda_all', summary['weighted_cda']):.4f}")
+        print(f"Weighted CdA (keep {keep_percent:.0f}%): {summary.get('weighted_cda_kept', summary['weighted_cda']):.4f} [{kept_used} segments]")
         print(f"Average CdA: {summary['average_cda']:.4f}")
         print(f"CdA standard deviation: {summary['cda_std']:.4f}")
 

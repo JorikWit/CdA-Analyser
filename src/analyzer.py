@@ -992,6 +992,72 @@ class CDAAnalyzer:
         s = seconds % 60
         return f"{h:02d}:{m:02d}:{s:02d}"
 
+    def _calculate_weighted_cda_metrics(self, segment_results):
+        """Return weighted CdA metrics for all segments and kept subset.
+
+        The kept subset is created by repeatedly removing the segment with the
+        largest absolute deviation from the current duration-weighted mean CdA,
+        until only ``cda_keep_percent`` of segments remain.
+        """
+        keep_percent = self.parameters.get('cda_keep_percent')
+        if keep_percent is None:
+            # Backward-compatibility for older configs that still provide trim
+            # values instead of a single keep percentage.
+            trim_low = float(self.parameters.get('cda_trim_low_percent', 0.0))
+            trim_high = float(self.parameters.get('cda_trim_high_percent', 20.0))
+            keep_percent = 100.0 - max(0.0, trim_low) - max(0.0, trim_high)
+        keep_percent = float(keep_percent)
+        keep_percent = max(1.0, min(100.0, keep_percent))
+
+        # Filter segments with usable CdA values
+        valid_segments = [s for s in segment_results if s.get('cda') is not None]
+        if not valid_segments:
+            return {
+                'weighted_cda_all': float('nan'),
+                'weighted_cda_kept': float('nan'),
+                'keep_percent': keep_percent,
+                'kept_segments_used': 0,
+            }
+
+        # Weighted CdA across all segments (duration-weighted)
+        all_cda = [s['cda'] for s in valid_segments]
+        all_weights = [max(float(s.get('duration', 0.0)), 0.0) for s in valid_segments]
+        if sum(all_weights) > 0:
+            weighted_all = float(np.average(all_cda, weights=all_weights))
+        else:
+            weighted_all = float(np.mean(all_cda))
+
+        # Iteratively remove the largest absolute outlier from the current
+        # duration-weighted mean until the target keep size is reached.
+        current_segments = list(valid_segments)
+        n = len(current_segments)
+        target_keep_count = max(1, int(np.ceil(n * keep_percent / 100.0)))
+
+        while len(current_segments) > target_keep_count:
+            current_cda = [s['cda'] for s in current_segments]
+            current_weights = [max(float(s.get('duration', 0.0)), 0.0) for s in current_segments]
+            if sum(current_weights) > 0:
+                center = float(np.average(current_cda, weights=current_weights))
+            else:
+                center = float(np.mean(current_cda))
+
+            remove_idx = int(np.argmax([abs(s['cda'] - center) for s in current_segments]))
+            current_segments.pop(remove_idx)
+
+        kept_cda = [s['cda'] for s in current_segments]
+        kept_weights = [max(float(s.get('duration', 0.0)), 0.0) for s in current_segments]
+        if sum(kept_weights) > 0:
+            weighted_kept = float(np.average(kept_cda, weights=kept_weights))
+        else:
+            weighted_kept = float(np.mean(kept_cda))
+
+        return {
+            'weighted_cda_all': weighted_all,
+            'weighted_cda_kept': weighted_kept,
+            'keep_percent': keep_percent,
+            'kept_segments_used': len(current_segments),
+        }
+
 
     
     def _calculate_summary(self, segment_results):
@@ -1003,12 +1069,9 @@ class CDAAnalyzer:
         self.logger.debug(f"Calculating summary from {len(segment_results)} segments")
         
         cda_values = [s['cda'] for s in segment_results]
-        weights = [s['duration'] for s in segment_results]
-        
-        # Calculate weighted average
-        total_weight = sum(weights)
-        weighted_cda = (np.average(cda_values, weights=weights) if total_weight > 0 
-                       else np.mean(cda_values))
+        weighted_metrics = self._calculate_weighted_cda_metrics(segment_results)
+        weighted_cda_all = weighted_metrics['weighted_cda_all']
+        weighted_cda_kept = weighted_metrics['weighted_cda_kept']
         
         wind_coefficients = self._calculate_wind_angle_coefficients(segment_results)
 
@@ -1029,7 +1092,12 @@ class CDAAnalyzer:
 
         summary = {
             'total_segments': len(segment_results),
-            'weighted_cda': weighted_cda,
+            # Primary weighted CdA uses iterative outlier removal
+            'weighted_cda': weighted_cda_kept,
+            'weighted_cda_all': weighted_cda_all,
+            'weighted_cda_kept': weighted_cda_kept,
+            'keep_percent': weighted_metrics['keep_percent'],
+            'kept_segments_used': weighted_metrics['kept_segments_used'],
             'average_cda': np.mean(cda_values),
             'cda_std': np.std(cda_values),
             'wind_coefficients': wind_coefficients,
@@ -1045,5 +1113,9 @@ class CDAAnalyzer:
             'avg_wind_direction': avg_wind_direction
         }
         
-        self.logger.debug(f"Summary calculated: weighted_cda={weighted_cda:.4f}")
+        self.logger.debug(
+            f"Summary calculated: weighted_all={weighted_cda_all:.4f}, "
+            f"weighted_kept={weighted_cda_kept:.4f}, "
+            f"keep_percent={weighted_metrics['keep_percent']:.1f}%"
+        )
         return summary

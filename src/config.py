@@ -4,14 +4,16 @@
 DEFAULT_PARAMETERS = {
     'min_segment_length': 50,  # meters
     'min_duration': 15,   # seconds
-    'subsegment_min_duration_s': 5.0,   # seconds per sub-segment
-    'subsegment_min_points':     5,     # minimum data-points per sub-segment
     'max_slope_variation': 1.00,  # degrees
-    'min_speed': 8.3,     # m/s
+    'min_speed': 1.0,     # m/s
     'max_speed': 20.0,    # m/s
-    'speed_steady_threshold': .35,    # m/s
+    'speed_steady_threshold': .50,    # m/s
     'power_steady_threshold': 150.0,   # watts
     'slope_steady_threshold': 5.0,    # degrees
+
+    'cda_keep_percent': 80.0,       # iteratively remove largest abs CdA outliers until x% remains
+    'subsegment_min_duration_s': 5.0,   # seconds per sub-segment
+    'subsegment_min_points':     5,     # minimum data-points per sub-segment
     'rider_mass': 75.0,  # kg
     'bike_mass': 10.0,   # kg
     'rolling_resistance': 0.003,
