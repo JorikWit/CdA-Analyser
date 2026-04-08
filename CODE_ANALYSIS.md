@@ -1,25 +1,5 @@
 # CdA Analyzer - Complete Code Analysis
 
-> **Last updated: Session 4**  
-> All bugs from Sessions 1–3 plus the new Session 4 findings have been implemented.  
-> See `BUG_REPORT.md` for the full bug history and per-session fix log.
-
----
-
-## Session 4 Change Summary
-| File | Change |
-|------|--------|
-| `analyzer.py` | `_calculate_air_density` converted to `@staticmethod`; no longer creates `WeatherService` per segment |
-| `analyzer.py` | `analyze_ride`: `if summary and ride_info` prevents KeyError in GUI when 0 segments |
-| `analyzer.py` | `_calculate_acceleration`: `pd.Series(acceleration, index=df.index)` prevents silent NaN on non-default-indexed DataFrames |
-| `analyzer.py` | `_prepare_averaged_data`: fallback acceleration Series gets `index=segment_df.index` |
-| `qt_gui.py` | `_calculate_simulation_results`: `try/finally` ensures `wind_effect_factor` is always restored |
-| `qt_gui.py` | `_generate_plots` + `_generate_simulation_plots`: `np.polyfit` guarded with `len(set(wind_angles)) > 2` |
-| `qt_gui.py` | `resource_path`, `_set_window_icon`, `_generate_simulation_plots`: `print()` → `_logger.warning()` |
-| `qt_gui.py` | `_display_analysis_results`: NaN/None weather values display as `N/A` instead of `nan` |
-
----
-
 ## Project Overview
 **CdA Analyzer** is a Python application that analyzes cycling data from FIT files to calculate the coefficient of drag (CdA) and frontal area. It processes bike ride data, identifies steady-state segments, calculates aerodynamic properties, and provides both CLI and GUI interfaces for analysis.
 
@@ -82,6 +62,7 @@ FIT File → Parser → Analyzer → Weather Service → Results
 - speed_steady_threshold: 0.35 m/s (variability tolerance)
 - power_steady_threshold: 500W
 - slope_steady_threshold: 5.0°
+- cda_keep_percent: 80.0 (iteratively remove largest outliers until 80% of segments remain)
 - rider_mass: 75 kg (default)
 - bike_mass: 10 kg
 - rolling_resistance: 0.003
@@ -114,14 +95,23 @@ FIT File → Parser → Analyzer → Weather Service → Results
   - Extracts all 'record' messages
   - Returns Pandas DataFrame
 
-- **`_process_data(df)`** - Data cleaning and transformation
+- `_process_data(df, use_open_elevation_api, elevation_service)` - Data cleaning and transformation
   - Converts position from semicircles to decimal degrees
   - Converts speed from mm/s to m/s if needed
   - Calls `_calculate_distance()` if 'distance' column is absent
   - `df.ffill().bfill()` fills missing values in ALL columns
-    - ⚠️ NOTE: this includes `power` — if power drops out, gaps are filled with the
-      last valid reading rather than staying NaN. Steady-segment filtering may
-      subsequently fail to detect those gaps.
+    - NOTE: this includes `power` — if power drops out, gaps are filled with the last valid reading rather than staying NaN. Steady-segment filtering may subsequently fail to detect those gaps.
+  - NOTE: API elevation fetching is now deferred to analysis time; this method does not call the API
+
+- **`apply_open_elevation_to_dataframe(df, elevation_service, status_callback)`** (NEW) - Reusable elevation mapping method
+  - Applies Open-Elevation API data to dataframe after parsing
+  - Chunks coordinates into batches of 500 for efficient API requests
+  - Automatically sub-chunks to 50 if payload exceeds 413 limit
+  - Deduplicates coordinates before sending
+  - Uses original coordinate tuples as keys to avoid precision-mismatch misses
+  - Retries on 429 (rate limit) with exponential backoff: 1s, 2s, 4s
+  - Emits status messages via optional callback for UI debug display
+  - Returns filled dataframe with `altitude_api` column, or original if API fails
 
 - **`_calculate_distance(df)`** — Vectorized numpy haversine  
   - All coordinates are broadcast to numpy arrays simultaneously
@@ -175,6 +165,12 @@ FIT File → Parser → Analyzer → Weather Service → Results
 - `_apply_stability_filters(df, mask)` - Check rolling std for power/speed/slope
 - `_group_into_segments(df, steady_mask)` - Group consecutive steady points
 - `_filter_segments_by_criteria(segments)` - Minimum duration/distance check
+
+**Note on Elevation Data**:
+- Altitude data now comes from two sources: `altitude_fit` (FIT file) and `altitude_api` (Open-Elevation API)
+- During analysis, the active altitude source is selected in `_prepare_elevation_for_analysis()` and stored as `altitude` for downstream calculations
+- If API is enabled and data is available, `altitude` uses API data; otherwise falls back to FIT data
+- Slope calculations use whichever altitude source is active in the dataframe
 
 **CdA Calculation Process**:
 - `calculate_cda_for_segment(segment_df, weather_data)` - Per-segment analysis
@@ -238,7 +234,14 @@ FIT File → Parser → Analyzer → Weather Service → Results
   - Used for validation/simulation
 
 **Outlier Handling**:
-- `_filter_cda_outliers(cda_values)` - IQR-based removal
+- `_calculate_weighted_cda_metrics(segment_results)` - Iterative absolute-deviation removal
+  - Computes duration-weighted mean CdA across all segments
+  - Iteratively removes the segment with largest absolute deviation from current mean
+  - Continues until target keep-percent (e.g., 80%) of segments remain
+  - Returns both all-segment and kept-only weighted CdA values
+  - Provides backward-compatibility: if old trim settings present, derives keep% from them
+
+- `_filter_cda_outliers(cda_values)` - IQR-based removal (per sub-segment data)
   - Calculates Q75, Q25
   - Removes values outside (Q25 - 1.5*IQR, Q75 + 1.5*IQR)
 
@@ -250,8 +253,11 @@ FIT File → Parser → Analyzer → Weather Service → Results
 
 **Summary Calculation**:
 - `_calculate_summary(segment_results)` - Aggregate statistics
-  - Weighted average CdA (weighted by segment duration)
-  - Standard deviation, min/max CdA
+  - Calls `_calculate_weighted_cda_metrics()` to compute both all-segment and kept (iteratively-trimmed) weighted CdA
+  - Primary `weighted_cda` field uses the kept-percent result (outlier-resistant)
+  - Also stores `weighted_cda_all` for reference (all segments included)
+  - Stores `keep_percent`, `kept_segments_used` for reporting
+  - Calculates standard deviation, min/max CdA across all segments
   - Wind angle coefficients (2nd order polynomial fit)
   - Average weather, wind, acceleration metrics
   - Ride info from segment data
@@ -282,19 +288,19 @@ Where v_air = v_bike + wind_effect
 CdA = (2 * Aero Power) / (ρ * v_air³)
 ```
 
-#### Critical Logic Issues (Post Session-4 State)
-- ✅ All print-debug statements replaced with `logger.debug()/warning()`
-- ✅ Duplicate `avg_wind_speed` key fixed (single-pass pre-computation)
-- ✅ Negative air_speed clamped to 0.1 minimum
-- ✅ `_calculate_air_density` no longer creates a new WeatherService (and requests.Session) per segment — formula is now a pure `@staticmethod`
-- ✅ Zero-segment case: `analyze_ride` guards with `if summary:` (falsy empty dict) so `ride_info` is only added to non-empty summaries, preventing KeyError in GUI
-- ✅ Index-alignment bug in `_calculate_acceleration` fixed: `pd.Series(acceleration, index=df.index)`
-- ✅ Same fix in `_prepare_averaged_data` fallback acceleration Series
+#### Critical Logic Issues
+- All print-debug statements replaced with `logger.debug()/warning()`
+- Duplicate `avg_wind_speed` key fixed (single-pass pre-computation)
+- Negative air_speed clamped to 0.1 minimum
+- `_calculate_air_density` no longer creates a new WeatherService (and requests.Session) per segment — formula is now a pure `@staticmethod`
+- Zero-segment case: `analyze_ride` guards with `if summary:` (falsy empty dict) so `ride_info` is only added to non-empty summaries, preventing KeyError in GUI
+- Index-alignment bug in `_calculate_acceleration` fixed: `pd.Series(acceleration, index=df.index)`
+- Same fix in `_prepare_averaged_data` fallback acceleration Series
 
 ---
 
 ### 5. `weather.py` (Environmental Data)
-**Lines**: ~130  
+**Lines**: ~140  
 **Class**: `WeatherService`
 
 **Methods**:
@@ -302,14 +308,11 @@ CdA = (2 * Aero Power) / (ρ * v_air³)
   - Selects forecast or archive API based on date (>30 days old uses archive)
   - Uses a persistent `requests.Session()` for connection reuse
   - `timeout=10` on all HTTP calls to prevent application freeze
-  - Extracts temperature, wind_speed, wind_direction, pressure
+  - Explicitly requests wind speed in m/s via `wind_speed_unit='ms'` parameter
+  - Extracts temperature, wind_speed (guaranteed m/s), wind_direction, pressure
   - Finds closest hourly index to target timestamp
   - Returns default values and logs a warning on any API failure
-  - ⚠️ NOTE: `wind_speed_10m` from Open-Meteo defaults to **km/h**. No `wind_speed_unit`
-    parameter is set, so wind speed in returned dict is in km/h but used as m/s in the
-    analyzer. Existing `wind_effect_factor` calibrations absorb this unit discrepancy.
-    To fix properly: add `'wind_speed_unit': 'ms'` to `params` and multiply all
-    calibrated `wind_effect_factor` values by ~3.6.
+  - Wind effects now correctly use meters/second units without factor adjustments
 
 - `calculate_air_density(temperature, pressure, humidity=50%)`
   - Converts to Kelvin; uses ideal gas law: `ρ = (P × 100) / (287.05 × T_K)`
@@ -411,10 +414,12 @@ CdA = (2 * Aero Power) / (ρ * v_air³)
 
 - `_generate_map()` - Create interactive map with Folium
   - Colors segments using distinct color scheme (tab20/tab20b/tab20c)
-  - Marks segment start/end points
-  - Shows weather data popups
-  - Saves to HTML temp file
-  - Opens in browser
+  - Filters segments to drop rows with invalid latitude/longitude before drawing polylines
+  - Marks segment start/end points with numbered markers
+  - Shows weather data popups on segment polylines
+  - **New**: Saves Folium output to temp HTML file instead of using `setHtml()`
+  - **New**: Loads map via `setUrl(QUrl.fromLocalFile(...))` for robust rendering of large maps
+  - **New**: Enables `LocalContentCanAccessRemoteUrls` to allow Leaflet/Folium CDN assets
 
 - `_generate_plots()` - Create matplotlib plots
   - CdA vs wind angle scatter plot
@@ -621,8 +626,12 @@ CdA = (2 * Aero Power) / (ρ * v_air³)
     ],
     'summary': {
         'total_segments': int,
-        'weighted_cda': float,
-        'average_cda': float,
+        'weighted_cda': float,              # Primary: uses iterative keep-percent outlier removal
+        'weighted_cda_all': float,          # Reference: all segments included
+        'weighted_cda_kept': float,         # Same as weighted_cda (kept-percent result)
+        'keep_percent': float,              # Percentage of segments retained after outlier removal
+        'kept_segments_used': int,          # Number of segments used in kept-percent calculation
+        'average_cda': float,               # Simple mean across all segments
         'cda_std': float,
         'min_cda': float,
         'max_cda': float,
@@ -671,70 +680,73 @@ CdA = (2 * Aero Power) / (ρ * v_air³)
 - Main thread handles signal and updates UI
 - Prevents UI freezing during analysis
 
-### 2. Rolling Average Smoothing
-- 5-point centered rolling average on all metrics
-- Filters NaN values after smoothing
-- Reduces noise in power and speed data
+### 2. Iterative Outlier Removal
+- Keep-percent percentage defines target segment count
+- Algorithm: repeatedly compute duration-weighted CdA mean, remove segment with largest absolute deviation
+- Continues until target count reached
+- Provides robust CdA estimate resistant to transient anomalies (e.g., braking, posture shifts)
+- Default 80% keep-percent removes ~20% most-extreme outliers
+- More sensitive than IQR-based removal (detects per-segment anomalies, not per-point)
 
-### 3. Physics-Based Calculation
+### 3. Rolling Average Smoothing
+- 5-point centered rolling average on all metrics (within sub-segments)
+- Filters NaN values after smoothing
+- Reduces noise in power and speed data before CdA calculation
+
+### 4. Physics-Based Calculation
 - Decompose power into physical components
 - Calculate residual power (aerodynamic)
 - Derive CdA from aerodynamic power and air speed
 - Account for drivetrain losses
 
-### 4. Weather Caching
+### 5. Weather Caching
 - Cache weather data per segment in `weather_cache` dict
 - Avoid redundant API calls during reanalysis
 - Cache stored in memory (not persistent)
 
-### 5. Steady State Detection (Multi-Stage Filtering)
+### 6. Steady State Detection (Multi-Stage Filtering)
 1. Apply speed range filter
 2. Apply rolling std filters (power, speed, slope stability)
 3. Group consecutive steady points
 4. Filter by minimum duration/distance
 5. Calculate metrics on remaining segments
 
-### 6. Parameter Profiles
+### 7. Parameter Profiles
 - Store test-specific configurations in `config.py`
 - Different riders/bikes have different optimal parameters
 - CdA results vary significantly with rider mass and rolling resistance
 
 ---
 
-## Critical Code Issues & Debugging Notes
+## Critical Code Issues & Resolution Status
 
-### Issue #1: None Type Handling (analyzer.py)
-**Location**: Multiple lines throughout analyzer.py
-**Problem**: Debug print statements left in production code
-```python
-if speed is None:
-    speed = 0.0
-    print("speed fix")
-```
-**Solution**: Replace with proper error handling/logging
+### RESOLVED: Map Rendering Silent Failure
+**Location**: `qt_gui.py`, `_generate_map()`
+**Problem**: Large Folium HTML output via `setHtml()` would silently fail to render in QWebEngineView
+**Solution**: Save to temp file and load via `setUrl(QUrl.fromLocalFile(...))`
+- More reliable for large HTML payloads
+- Avoids QWebEngine internal buffer limitations
+- Coordinates are now filtered before rendering to prevent invalid polylines
 
-### Issue #2: Duplicate Summary Key
+### RESOLVED: Outlier Strategy
+**Old Approach**: Fixed asymmetric low/high trim percentages
+**New Approach**: Single keep-percent parameter with iterative outlier removal
+- More intuitive: "keep 80% of segments"
+- Better outlier detection: removes largest absolute deviations iteratively
+- Customizable per-run via `cda_keep_percent` in config
+
+### RESOLVED: None Type Handling & Debug Statements
+**Location**: analyzer.py
+**Resolution**: Replaced print() with proper logger.debug()/warning() calls
+
+### RESOLVED: Duplicate Dictionary Keys
 **Location**: `analyzer.py`, `_calculate_summary()`
-**Problem**: 'avg_wind_speed' assigned twice (overwrites first value)
-```python
-'avg_wind_speed': np.mean([s.get('wind_speed', 0) for s in segment_results]),
-...
-'avg_wind_speed': np.mean([s['wind_speed'] for s in segment_results if 'wind_speed' in s]),
-```
+**Resolution**: Single-pass pre-computation of weather statistics
 
-### Issue #3: Missing Weather Data Handling
-**Location**: Various methods in analyzer.py
-**Problem**: Weather data may be None but calculations continue
-**Impact**: Could produce invalid results in areas without weather API coverage
-
-### Issue #4: GUI Memory Management
-**Location**: qt_gui.py, GUI plotting
-**Problem**: Matplotlib figures created but cleanup may leak memory with many reanalysis operations
-
-### Issue #5: API Timeout Risk
-**Location**: weather.py, `get_weather_data()`
-**Problem**: `requests.get()` could hang indefinitely
-**Solution**: Add timeout parameter
+### NOTED: Weather Unit Consistency
+**Location**: `weather.py`
+**Status**: Now explicitly requests m/s from Open-Meteo API
+**Details**: Wind speed properly converted to m/s (no more km/h confusion)
 
 ---
 
