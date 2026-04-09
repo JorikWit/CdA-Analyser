@@ -68,7 +68,7 @@ class WeatherService:
                     'temperature_2m',
                     'wind_speed_10m',
                     'wind_direction_10m',
-                    'pressure_msl'
+                    'surface_pressure'
                 ]),
                 'wind_speed_unit': 'ms',
                 'start_date': date_str,
@@ -100,7 +100,7 @@ class WeatherService:
                 'temperature': hourly_data['temperature_2m'][closest_idx],
                 'wind_speed': hourly_data['wind_speed_10m'][closest_idx],
                 'wind_direction': hourly_data['wind_direction_10m'][closest_idx],
-                'pressure': hourly_data['pressure_msl'][closest_idx] if 'pressure_msl' in hourly_data else 1013.25
+                'pressure': hourly_data['surface_pressure'][closest_idx] if 'surface_pressure' in hourly_data else 1013.25
             }
             
             return weather_data
