@@ -279,6 +279,8 @@ class CDAAnalyzer:
 
             total_distance = None
             avg_speed = None
+            avg_power = None
+            normalized_power = None
             total_elevation_gain = 0.0
 
             if 'distance' in df.columns:
@@ -286,6 +288,14 @@ class CDAAnalyzer:
 
             if 'speed' in df.columns and duration_seconds > 0:
                 avg_speed = df['speed'].mean()
+
+            if 'power' in df.columns:
+                power_series = pd.to_numeric(df['power'], errors='coerce').dropna()
+                if len(power_series) > 0:
+                    avg_power = float(power_series.mean())
+                    # Normalized Power (NP): 30s rolling mean, 4th-power mean, 4th-root.
+                    rolling_30s = power_series.rolling(window=30, min_periods=1).mean()
+                    normalized_power = float(np.power(np.mean(np.power(rolling_30s, 4)), 0.25))
                 
             # Calculate Elevation Gain
             if 'altitude' in df.columns:
@@ -303,6 +313,8 @@ class CDAAnalyzer:
                 'total_distance_m': round(total_distance, 1) if total_distance is not None else None,
                 'average_speed_mps': round(avg_speed, 2) if avg_speed is not None else None,
                 'average_speed_kmh': round(avg_speed * 3.6, 2) if avg_speed is not None else None,
+                'average_power_w': round(avg_power, 1) if avg_power is not None else None,
+                'normalized_power_w': round(normalized_power, 1) if normalized_power is not None else None,
                 'elevation_gain_m': round(total_elevation_gain, 1) # Added field
             }
 
@@ -1034,21 +1046,45 @@ class CDAAnalyzer:
         }
 
     def _get_preloaded_weather_for_segment(self, segment):
-        """Return nearest preloaded weather sample for the segment start distance."""
+        """Return nearest preloaded weather sample for the segment start time.
+
+        Time-based matching avoids picking wrong weather samples on looped/lap
+        courses where the rider passes the same location at different times.
+        """
         if not self.preloaded_weather_samples:
             return None
-        if 'distance' not in segment.columns or segment.empty:
+        if segment.empty:
             return None
 
-        try:
-            segment_distance = float(segment['distance'].iloc[0])
-        except Exception:
+        closest = None
+
+        # Primary strategy: match by nearest segment start timestamp.
+        if 'timestamp' in segment.columns:
+            try:
+                segment_ts = pd.Timestamp(segment['timestamp'].iloc[0])
+                closest = min(
+                    self.preloaded_weather_samples,
+                    key=lambda s: abs(
+                        (pd.Timestamp(s.get('timestamp')) - segment_ts).total_seconds()
+                    ),
+                )
+            except Exception:
+                closest = None
+
+        # Fallback for malformed/missing timestamps: nearest sampled distance.
+        if closest is None and 'distance' in segment.columns:
+            try:
+                segment_distance = float(segment['distance'].iloc[0])
+                closest = min(
+                    self.preloaded_weather_samples,
+                    key=lambda s: abs(float(s.get('distance', 0.0)) - segment_distance),
+                )
+            except Exception:
+                closest = None
+
+        if closest is None:
             return None
 
-        closest = min(
-            self.preloaded_weather_samples,
-            key=lambda s: abs(float(s.get('distance', 0.0)) - segment_distance)
-        )
         weather_data = closest.get('weather_data')
         if isinstance(weather_data, dict):
             return weather_data

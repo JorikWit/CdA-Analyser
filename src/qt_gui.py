@@ -340,8 +340,8 @@ class GUIInterface(QMainWindow):
         self.sim_canvas = None
         self.worker = None
         self._map_html_path = None
-        self.load_weather_api_on_file_load = False
-        self.load_elevation_api_on_file_load = False
+        self.load_weather_api_on_file_load = True
+        self.load_elevation_api_on_file_load = True
         self.weather_api_loaded = False
         self.elevation_api_loaded = False
         self.preloaded_weather_samples = []
@@ -456,11 +456,11 @@ class GUIInterface(QMainWindow):
 
         # API call options during file load
         self.load_weather_api_checkbox = QCheckBox("Call Weather API on file load")
-        self.load_weather_api_checkbox.setChecked(False)
+        self.load_weather_api_checkbox.setChecked(True)
         layout.addWidget(self.load_weather_api_checkbox, 2, 2, 1, 2)
 
         self.load_elevation_api_checkbox = QCheckBox("Call Elevation API on file load")
-        self.load_elevation_api_checkbox.setChecked(False)
+        self.load_elevation_api_checkbox.setChecked(True)
         layout.addWidget(self.load_elevation_api_checkbox, 2, 4, 1, 2)
 
         # File status (row 3) - expandable
@@ -865,20 +865,11 @@ class GUIInterface(QMainWindow):
             if len(self.ride_data.columns) > 10:
                 self.file_status.append(f"... and {len(self.ride_data.columns) - 10} more\n")
 
-            # Parameter tab checkboxes are calculation-only; enabled only if preloaded data exists.
-            self.parameters['use_open_elevation_api'] = bool(self.elevation_api_loaded)
-            self.parameters['use_weather_api'] = bool(self.weather_api_loaded)
-
             self.analyzer = CDAAnalyzer(self.parameters)
             self.analyzer.elevation_source = elev_source
             self.analyzer.preloaded_weather_samples = list(self.preloaded_weather_samples)
             self.analyzer.allow_runtime_weather_fetch = False
             self.weather_service = WeatherService()
-
-            if 'use_open_elevation_api' in self.param_checkboxes:
-                self.param_checkboxes['use_open_elevation_api'].setChecked(self.parameters['use_open_elevation_api'])
-            if 'use_weather_api' in self.param_checkboxes:
-                self.param_checkboxes['use_weather_api'].setChecked(self.parameters['use_weather_api'])
 
             self._enable_segment_parameters()
             self._cleanup_results(full_reset=True)
@@ -931,27 +922,29 @@ class GUIInterface(QMainWindow):
             QMessageBox.critical(self, "Error", f"Error saving parameters: {str(e)}")
 
     def _sync_api_parameter_checkbox_state(self):
-        """Enable/disable API parameter checkboxes based on preloaded data availability."""
+        """Keep API parameter checkboxes enabled and add availability hints.
+
+        These checkboxes are calculation switches and should stay user-controllable
+        even when no preloaded API data exists.
+        """
         weather_key = 'use_weather_api'
         elevation_key = 'use_open_elevation_api'
 
         if weather_key in self.param_checkboxes:
             checkbox = self.param_checkboxes[weather_key]
+            checkbox.setEnabled(True)
             if self.weather_api_loaded:
-                checkbox.setEnabled(True)
+                checkbox.setToolTip("Weather API data preloaded and available")
             else:
-                checkbox.setChecked(False)
-                checkbox.setEnabled(False)
-                self.parameters[weather_key] = False
+                checkbox.setToolTip("No preloaded weather API data; calculation falls back to no wind")
 
         if elevation_key in self.param_checkboxes:
             checkbox = self.param_checkboxes[elevation_key]
+            checkbox.setEnabled(True)
             if self.elevation_api_loaded:
-                checkbox.setEnabled(True)
+                checkbox.setToolTip("Elevation API data preloaded and available")
             else:
-                checkbox.setChecked(False)
-                checkbox.setEnabled(False)
-                self.parameters[elevation_key] = False
+                checkbox.setToolTip("No preloaded elevation API data; calculation falls back to FIT altitude")
 
     def _prefetch_weather_api_on_load(self):
         """Prefetch weather data for the full route at 3km local-time intervals."""
@@ -1184,6 +1177,10 @@ class GUIInterface(QMainWindow):
                 t.append(f"  Total distance: {ride['total_distance_m']:.0f} m")
             if ride.get('average_speed_kmh') is not None:
                 t.append(f"  Average speed: {ride['average_speed_kmh']:.2f} km/h")
+            if ride.get('average_power_w') is not None:
+                t.append(f"  Average power: {ride['average_power_w']:.1f} W")
+            if ride.get('normalized_power_w') is not None:
+                t.append(f"  NP: {ride['normalized_power_w']:.1f} W")
             if ride.get('elevation_gain_m') is not None:
                 t.append(f"  Elevation Gain: {ride['elevation_gain_m']:.1f} m")
             t.append("")
@@ -1433,10 +1430,11 @@ class GUIInterface(QMainWindow):
             mask_20 = [abs(y) <= 20 for y in yaw_vals]
             yv20 = [yaw_vals[i] for i in range(len(yaw_vals)) if mask_20[i]]
             cv20 = [cda_vals[i] for i in range(len(cda_vals)) if mask_20[i]]
-            if len(set([round(y, 1) for y in yv20])) >= 3:
-                co = np.polyfit(yv20, cv20, 2)
-                ax5.plot(np.linspace(-20, 20, 200), np.poly1d(co)(np.linspace(-20, 20, 200)), color='red', lw=1.5)
-                ax5.text(0.95, 0.05, f"y={co[0]:.3e}x\u00b2+{co[1]:.3e}x+{co[2]:.3e}", transform=ax5.transAxes,
+            if len(set([round(y, 1) for y in yv20])) >= 5:
+                co = np.polyfit(yv20, cv20, 4)
+                x_fit = np.linspace(-20, 20, 200)
+                ax5.plot(x_fit, np.poly1d(co)(x_fit), color='red', lw=1.5)
+                ax5.text(0.95, 0.05, f"y={co[0]:.3e}x^4+{co[1]:.3e}x^3+{co[2]:.3e}x^2+{co[3]:.3e}x+{co[4]:.3e}", transform=ax5.transAxes,
                          fontsize=7, color='red', ha='right', va='bottom', bbox=dict(facecolor='white', alpha=0.6))
             for i, sid in enumerate(seg_ids):
                 ax5.annotate(str(sid), (yaw_vals[i], cda_vals[i]), xytext=(5, 5), textcoords='offset points', fontsize=6, alpha=0.8)
@@ -1834,10 +1832,11 @@ class GUIInterface(QMainWindow):
             mask_20 = [abs(y) <= 20 for y in yaw_vals]
             yv20 = [yaw_vals[i] for i in range(len(yaw_vals)) if mask_20[i]]
             cv20 = [cda_vals[i] for i in range(len(cda_vals)) if mask_20[i]]
-            if len(set([round(y, 1) for y in yv20])) >= 3:
-                co = np.polyfit(yv20, cv20, 2)
-                ax5.plot(np.linspace(-20, 20, 200), np.poly1d(co)(np.linspace(-20, 20, 200)), color='red', lw=1.5)
-                ax5.text(0.95, 0.05, f"y={co[0]:.3e}x\u00b2+{co[1]:.3e}x+{co[2]:.3e}", transform=ax5.transAxes,
+            if len(set([round(y, 1) for y in yv20])) >= 5:
+                co = np.polyfit(yv20, cv20, 4)
+                x_fit = np.linspace(-20, 20, 200)
+                ax5.plot(x_fit, np.poly1d(co)(x_fit), color='red', lw=1.5)
+                ax5.text(0.95, 0.05, f"y={co[0]:.3e}x^4+{co[1]:.3e}x^3+{co[2]:.3e}x^2+{co[3]:.3e}x+{co[4]:.3e}", transform=ax5.transAxes,
                          fontsize=7, color='red', ha='right', va='bottom', bbox=dict(facecolor='white', alpha=0.6))
             for i, sid in enumerate(seg_ids):
                 ax5.annotate(str(sid), (yaw_vals[i], cda_vals[i]), xytext=(5, 5), textcoords='offset points', fontsize=6, alpha=0.8)
