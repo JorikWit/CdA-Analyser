@@ -188,36 +188,24 @@ class WorkerThread(QThread):
     def _prepare_elevation_for_analysis(self):
         use_api = bool(self.analyzer.parameters.get('use_open_elevation_api', False))
 
-        if not use_api:
-            if 'altitude_fit' in self.ride_data.columns:
-                self.ride_data['altitude'] = self.ride_data['altitude_fit']
-            self.analyzer.elevation_source = 'FIT file'
-            self._emit_status("Elevation API disabled: using FIT altitude")
-            return
+        has_api_altitude = (
+            'altitude_api' in self.ride_data.columns and
+            self.ride_data['altitude_api'].notna().any()
+        )
 
-        if 'latitude' not in self.ride_data.columns or 'longitude' not in self.ride_data.columns:
-            self.analyzer.elevation_source = 'FIT file (no GPS coordinates)'
-            self._emit_status("Elevation API debug: no GPS columns, using FIT altitude")
-            return
-
-        if 'altitude_api' in self.ride_data.columns and self.ride_data['altitude_api'].notna().any():
+        if use_api and has_api_altitude:
             self.ride_data['altitude'] = self.ride_data['altitude_api']
-            self.analyzer.elevation_source = 'Open-Elevation API (cached)'
-            self._emit_status("Elevation API: using cached values from previous analysis")
+            self.analyzer.elevation_source = 'Open-Elevation API (preloaded at file load)'
+            self._emit_status("Elevation source: Open-Elevation API (preloaded)")
             return
 
-        self._emit_status("Elevation API: fetching elevations at analysis start...")
-        fit_parser = FITParser()
-        self.ride_data = fit_parser.apply_open_elevation_to_dataframe(
-            self.ride_data,
-            status_callback=self._emit_status,
-        )
-        self.analyzer.elevation_source = fit_parser.elevation_source
-
-        api_points = int(self.ride_data['altitude_api'].notna().sum()) if 'altitude_api' in self.ride_data.columns else 0
-        self._emit_status(
-            f"Elevation API done: source={self.analyzer.elevation_source}, api_points={api_points}/{len(self.ride_data)}"
-        )
+        if 'altitude_fit' in self.ride_data.columns:
+            self.ride_data['altitude'] = self.ride_data['altitude_fit']
+        self.analyzer.elevation_source = 'FIT file'
+        if use_api and not has_api_altitude:
+            self._emit_status("Elevation API selected, but no preloaded API altitude found: using FIT altitude")
+        else:
+            self._emit_status("Elevation source: FIT file")
 
     def run(self):
         try:
@@ -352,6 +340,11 @@ class GUIInterface(QMainWindow):
         self.sim_canvas = None
         self.worker = None
         self._map_html_path = None
+        self.load_weather_api_on_file_load = False
+        self.load_elevation_api_on_file_load = False
+        self.weather_api_loaded = False
+        self.elevation_api_loaded = False
+        self.preloaded_weather_samples = []
 
         self.home_directory = os.path.expanduser('~')
         self.downloads_path = os.path.join(self.home_directory, 'Downloads')
@@ -461,10 +454,19 @@ class GUIInterface(QMainWindow):
         self.file_label.setStyleSheet("color: #555;")
         layout.addWidget(self.file_label, 1, 4)
 
+        # API call options during file load
+        self.load_weather_api_checkbox = QCheckBox("Call Weather API on file load")
+        self.load_weather_api_checkbox.setChecked(False)
+        layout.addWidget(self.load_weather_api_checkbox, 2, 2, 1, 2)
+
+        self.load_elevation_api_checkbox = QCheckBox("Call Elevation API on file load")
+        self.load_elevation_api_checkbox.setChecked(False)
+        layout.addWidget(self.load_elevation_api_checkbox, 2, 4, 1, 2)
+
         # File status (row 3) - expandable
         self.file_status = QTextEdit()
         self.file_status.setReadOnly(True)
-        layout.addWidget(self.file_status, 2, 0, 1, 7)  # Span both columns
+        layout.addWidget(self.file_status, 3, 0, 1, 7)  # Span both columns
 
         # About button in corner (row 0, column 6)
         about_btn = QPushButton("?")
@@ -474,7 +476,7 @@ class GUIInterface(QMainWindow):
         layout.addWidget(about_btn, 0, 6, alignment=Qt.AlignTop | Qt.AlignRight)
 
         # Set row stretch so file_status can expand if window is resized
-        layout.setRowStretch(2, 1)  # Give extra vertical space to row 3 (file_status)
+        layout.setRowStretch(3, 1)  # Give extra vertical space to file_status row
 
         # Optional: make columns expand properly
         layout.setColumnStretch(0, 2)
@@ -517,7 +519,11 @@ class GUIInterface(QMainWindow):
 
         self.param_entries = {}
         self.param_checkboxes = {}
+        hidden_parameter_keys = {'weather_sample_distance_m'}
         for key, value in self.parameters.items():
+            if key in hidden_parameter_keys:
+                continue
+
             row = QHBoxLayout()
             row.setSpacing(10)  # Optional: small spacing within the row
             row.setContentsMargins(10, 10, 0, 0)  # Tight margins for each row
@@ -822,20 +828,58 @@ class GUIInterface(QMainWindow):
             # Save current parameters from UI (including checkbox state) BEFORE loading
             self._save_parameters()
 
+            use_weather_api_on_load = bool(self.load_weather_api_checkbox.isChecked())
+            use_elevation_api_on_load = bool(self.load_elevation_api_checkbox.isChecked())
+
+            self.weather_api_loaded = False
+            self.elevation_api_loaded = False
+            self.preloaded_weather_samples = []
+
             fit_parser = FITParser()
-            self.ride_data = fit_parser.parse_fit_file(self.fit_file_path, False)
+            self.ride_data = fit_parser.parse_fit_file(
+                self.fit_file_path,
+                use_open_elevation_api=use_elevation_api_on_load,
+            )
             elev_source = fit_parser.elevation_source
             self.file_status.append(f"Successfully loaded {len(self.ride_data)} data points\n")
-            if self.parameters.get('use_open_elevation_api', False):
-                self.file_status.append("Open-Elevation API is enabled and will be called at analysis start\n")
+
+            if use_elevation_api_on_load:
+                self.elevation_api_loaded = (
+                    'altitude_api' in self.ride_data.columns and
+                    self.ride_data['altitude_api'].notna().any()
+                )
+                if self.elevation_api_loaded:
+                    self.file_status.append("Elevation API done: preloaded altitude available\n")
+                else:
+                    self.file_status.append("Elevation API selected but no altitude API data available\n")
+            else:
+                self.file_status.append("Elevation API on load: disabled\n")
+
+            if use_weather_api_on_load:
+                self._prefetch_weather_api_on_load()
+            else:
+                self.file_status.append("Weather API on load: disabled\n")
+
             cols = ', '.join(self.ride_data.columns[:10])
             self.file_status.append(f"Columns: {cols}\n")
             if len(self.ride_data.columns) > 10:
                 self.file_status.append(f"... and {len(self.ride_data.columns) - 10} more\n")
 
+            # Parameter tab checkboxes are calculation-only; enabled only if preloaded data exists.
+            self.parameters['use_open_elevation_api'] = bool(self.elevation_api_loaded)
+            self.parameters['use_weather_api'] = bool(self.weather_api_loaded)
+
             self.analyzer = CDAAnalyzer(self.parameters)
             self.analyzer.elevation_source = elev_source
+            self.analyzer.preloaded_weather_samples = list(self.preloaded_weather_samples)
+            self.analyzer.allow_runtime_weather_fetch = False
             self.weather_service = WeatherService()
+
+            if 'use_open_elevation_api' in self.param_checkboxes:
+                self.param_checkboxes['use_open_elevation_api'].setChecked(self.parameters['use_open_elevation_api'])
+            if 'use_weather_api' in self.param_checkboxes:
+                self.param_checkboxes['use_weather_api'].setChecked(self.parameters['use_weather_api'])
+
             self._enable_segment_parameters()
             self._cleanup_results(full_reset=True)
             self.tabs.setCurrentWidget(self.parameters_frame)
@@ -868,6 +912,12 @@ class GUIInterface(QMainWindow):
             # Handle checkboxes for boolean parameters
             for key, checkbox in self.param_checkboxes.items():
                 self.parameters[key] = checkbox.isChecked()
+
+            # Persist file-load API selection checkboxes.
+            if hasattr(self, 'load_weather_api_checkbox'):
+                self.load_weather_api_on_file_load = self.load_weather_api_checkbox.isChecked()
+            if hasattr(self, 'load_elevation_api_checkbox'):
+                self.load_elevation_api_on_file_load = self.load_elevation_api_checkbox.isChecked()
             
             # Update slider if wind_effect_factor changed
             if 'wind_effect_factor' in self.parameters:
@@ -880,6 +930,55 @@ class GUIInterface(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error saving parameters: {str(e)}")
 
+    def _sync_api_parameter_checkbox_state(self):
+        """Enable/disable API parameter checkboxes based on preloaded data availability."""
+        weather_key = 'use_weather_api'
+        elevation_key = 'use_open_elevation_api'
+
+        if weather_key in self.param_checkboxes:
+            checkbox = self.param_checkboxes[weather_key]
+            if self.weather_api_loaded:
+                checkbox.setEnabled(True)
+            else:
+                checkbox.setChecked(False)
+                checkbox.setEnabled(False)
+                self.parameters[weather_key] = False
+
+        if elevation_key in self.param_checkboxes:
+            checkbox = self.param_checkboxes[elevation_key]
+            if self.elevation_api_loaded:
+                checkbox.setEnabled(True)
+            else:
+                checkbox.setChecked(False)
+                checkbox.setEnabled(False)
+                self.parameters[elevation_key] = False
+
+    def _prefetch_weather_api_on_load(self):
+        """Prefetch weather data for the full route at 3km local-time intervals."""
+        self.preloaded_weather_samples = []
+        self.weather_api_loaded = False
+
+        if self.ride_data is None:
+            return
+
+        sample_distance_m = float(self.parameters.get('weather_sample_distance_m', 3000.0))
+        self.file_status.append(f"Weather API: preloading route weather every {sample_distance_m:.0f} m...")
+        QApplication.processEvents()
+
+        prefetch = self.weather_service.prefetch_weather_for_ride(
+            self.ride_data,
+            sample_distance_m=sample_distance_m,
+            status_callback=lambda msg: self.file_status.append(msg),
+        )
+        self.preloaded_weather_samples = prefetch.get('samples', [])
+        self.weather_api_loaded = len(self.preloaded_weather_samples) > 0
+
+        self.file_status.append(
+            f"Weather API done: samples={prefetch.get('sample_count', 0)}, "
+            f"grouped_calls={prefetch.get('grouped_request_count', 0)}"
+        )
+        QApplication.processEvents()
+
     def _disable_segment_parameters(self):
         for i, key in enumerate(list(self.parameters.keys())[:8]):
             if key in self.param_entries:
@@ -887,12 +986,16 @@ class GUIInterface(QMainWindow):
             if key in self.param_checkboxes:
                 self.param_checkboxes[key].setEnabled(False)
 
+        self._sync_api_parameter_checkbox_state()
+
     def _enable_segment_parameters(self):
         for i, key in enumerate(list(self.parameters.keys())[:8]):
             if key in self.param_entries:
                 self.param_entries[key].setEnabled(True)
             if key in self.param_checkboxes:
                 self.param_checkboxes[key].setEnabled(True)
+
+        self._sync_api_parameter_checkbox_state()
 
     def _safe_delete_canvas(self, canvas):
         if canvas is None:
@@ -945,6 +1048,8 @@ class GUIInterface(QMainWindow):
         self.summary_text.append("Running analysis...")
         self._save_parameters()
         self.analyzer.update_parameters(self.parameters)
+        self.analyzer.preloaded_weather_samples = list(self.preloaded_weather_samples)
+        self.analyzer.allow_runtime_weather_fetch = False
 
         self.tabs.setCurrentWidget(self.results_frame)
         #self.progress.setVisible(True)
@@ -972,8 +1077,6 @@ class GUIInterface(QMainWindow):
             self.progress.setRange(0, 100)
             self.progress.setValue(100)
             self.analysis_status.setText("Analysis complete!" if not error else "Analysis failed")
-
-            self._disable_segment_parameters()
             self.summary_text.clear()
 
             if error:
@@ -1470,12 +1573,6 @@ class GUIInterface(QMainWindow):
         """Calculate CdA results with simulated wind conditions"""
         if not self.analysis_results or not self.preprocessed_segments:
             return None
-        
-        # Check if elevation API is enabled but wasn't fetched during file load
-        use_api = self.parameters.get('use_open_elevation_api', False)
-        missing_api_column = bool(self.preprocessed_segments) and ('altitude_api' not in self.preprocessed_segments[0].columns)
-        if use_api and missing_api_column:
-            self._fetch_missing_elevation_data()
         
         simulation_results = []
         

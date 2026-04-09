@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import logging
 import math
+from datetime import datetime
 from config import DEFAULT_PARAMETERS
 from segment_splitter import split_into_subsegments
 
@@ -16,6 +17,8 @@ class CDAAnalyzer:
         self._total_mass = self.parameters['rider_mass'] + self.parameters['bike_mass']
         self._drivetrain_efficiency = 1.0 - self.parameters['drivetrain_loss']  # 3% drivetrain loss
         self.weather_cache = {}
+        self.preloaded_weather_samples = []
+        self.allow_runtime_weather_fetch = True
         self.elevation_source = None  # Track elevation source (FIT file or Open-Elevation API)
 
     def update_parameters(self, new_parameters):
@@ -270,8 +273,8 @@ class CDAAnalyzer:
             if 'timestamp' not in df.columns or df.empty:
                 return None
 
-            start_time = df['timestamp'].iloc[0]
-            end_time = df['timestamp'].iloc[-1]
+            start_time = self._to_local_time(df['timestamp'].iloc[0])
+            end_time = self._to_local_time(df['timestamp'].iloc[-1])
             duration_seconds = (end_time - start_time).total_seconds()
 
             total_distance = None
@@ -302,6 +305,19 @@ class CDAAnalyzer:
                 'average_speed_kmh': round(avg_speed * 3.6, 2) if avg_speed is not None else None,
                 'elevation_gain_m': round(total_elevation_gain, 1) # Added field
             }
+
+    @staticmethod
+    def _to_local_time(timestamp):
+        """Convert a ride timestamp to local wall-clock time for display.
+
+        FIT timestamps are commonly UTC. If a timestamp is naive, it is treated
+        as UTC and converted to the local timezone.
+        """
+        ts = pd.Timestamp(timestamp)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize('UTC')
+        local_tz = datetime.now().astimezone().tzinfo
+        return ts.tz_convert(local_tz).tz_localize(None)
 
     
     def _calculate_derived_metrics(self, df):
@@ -1007,20 +1023,62 @@ class CDAAnalyzer:
         """Store weather data for a segment"""
         if weather_data:
             self.weather_cache[segment_id] = weather_data.copy()
+
+    def _default_no_wind_weather(self):
+        """Fallback weather used when weather API usage is disabled."""
+        return {
+            'temperature': 20.0,
+            'wind_speed': 0.0,
+            'wind_direction': 0.0,
+            'pressure': 1013.25,
+        }
+
+    def _get_preloaded_weather_for_segment(self, segment):
+        """Return nearest preloaded weather sample for the segment start distance."""
+        if not self.preloaded_weather_samples:
+            return None
+        if 'distance' not in segment.columns or segment.empty:
+            return None
+
+        try:
+            segment_distance = float(segment['distance'].iloc[0])
+        except Exception:
+            return None
+
+        closest = min(
+            self.preloaded_weather_samples,
+            key=lambda s: abs(float(s.get('distance', 0.0)) - segment_distance)
+        )
+        weather_data = closest.get('weather_data')
+        if isinstance(weather_data, dict):
+            return weather_data
+        return None
     
     def _get_weather_data_for_segment(self, segment, weather_service, segment_id):
         """Get weather data for a specific segment"""
+        if not bool(self.parameters.get('use_weather_api', False)):
+            return self._default_no_wind_weather()
+
         # Check if weather data is already stored in segment
         if 'weather_data' in segment.columns:
             weather_data = segment['weather_data'].iloc[0]
             if pd.notna(weather_data) and isinstance(weather_data, dict):
                 self.logger.debug(f"Segment {segment_id}: Using cached weather data")
                 return weather_data
+
+        preloaded_weather = self._get_preloaded_weather_for_segment(segment)
+        if preloaded_weather:
+            self._store_weather_data(segment_id, preloaded_weather)
+            return preloaded_weather
         
         # Check cache
         if segment_id in self.weather_cache:
             self.logger.debug(f"Segment {segment_id}: Using cached weather data")
             return self.weather_cache[segment_id]
+
+        if not self.allow_runtime_weather_fetch:
+            self.logger.debug(f"Segment {segment_id}: runtime weather fetch disabled")
+            return self._default_no_wind_weather()
         
         # Fetch new weather data
         if not (weather_service and self._has_valid_coordinates(segment)):

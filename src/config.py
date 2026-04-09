@@ -19,7 +19,9 @@ DEFAULT_PARAMETERS = {
     'rolling_resistance': 0.003,
     'drivetrain_loss': 0.0275,
     'wind_effect_factor' : 0.25, # (0.0 - 1.0)  look at cli angle +- 0 and angle 180 must be 0 -> +-0.20 cda diff +  CdA standard deviation < 0.05
+    'use_weather_api': True,  # Use weather API data in calculations when data is available
     'use_open_elevation_api': False,  # Use Open-Elevation API for altitude data (batch request, all points in 1 call)
+    'weather_sample_distance_m': 3000.0,  # Distance-based weather samples loaded at FIT import
 
     # Sub-segment splitting: each steady segment is divided into chunks so that
     # local GPS bearing, slope and acceleration are computed per chunk rather
