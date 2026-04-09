@@ -2,6 +2,7 @@
 
 import requests
 import logging
+import json
 from config import OPEN_ELEVATION_URL
 
 
@@ -12,7 +13,7 @@ class ElevationService:
         self.logger = logging.getLogger(__name__)
         self.session = requests.Session()  # Reuse TCP connection across API calls
 
-    def _fetch_chunk(self, coords_chunk, retry_count=0, max_retries=3):
+    def _fetch_chunk(self, coords_chunk, retry_count=0, max_retries=3, status_callback=None):
         """Fetch one chunk of coordinates from Open-Elevation API with exponential backoff."""
         import time
         locations = [{'latitude': lat, 'longitude': lon} for lat, lon in coords_chunk]
@@ -29,6 +30,9 @@ class ElevationService:
             response.raise_for_status()
 
             data = response.json()
+            if status_callback:
+                raw = json.dumps(data, ensure_ascii=True, separators=(',', ':'))
+                status_callback(f"Elevation API raw response: {raw[:3000]}")
             results = data.get('results', [])
             if results:
                 sample = results[0]
@@ -56,10 +60,10 @@ class ElevationService:
                 wait_time = (2 ** retry_count) + (retry_count * 0.1)  # 1s, 2s, 4s
                 self.logger.info(f"Rate limited (429). Retrying in {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries})")
                 time.sleep(wait_time)
-                return self._fetch_chunk(coords_chunk, retry_count + 1, max_retries)
+                return self._fetch_chunk(coords_chunk, retry_count + 1, max_retries, status_callback=status_callback)
             raise
     
-    def get_elevations_batch(self, coordinates, chunk_size=500):
+    def get_elevations_batch(self, coordinates, chunk_size=500, status_callback=None):
         """
         Fetch elevations from Open-Elevation API with automatic chunking.
 
@@ -82,7 +86,7 @@ class ElevationService:
         for i in range(0, len(unique_coords), chunk_size):
             chunk = unique_coords[i:i + chunk_size]
             try:
-                chunk_map = self._fetch_chunk(chunk)
+                chunk_map = self._fetch_chunk(chunk, status_callback=status_callback)
                 merged_map.update(chunk_map)
             except requests.HTTPError as e:
                 status = getattr(e.response, 'status_code', None)
@@ -93,7 +97,7 @@ class ElevationService:
                     for j in range(0, len(chunk), sub_size):
                         sub_chunk = chunk[j:j + sub_size]
                         try:
-                            sub_map = self._fetch_chunk(sub_chunk)
+                            sub_map = self._fetch_chunk(sub_chunk, status_callback=status_callback)
                             merged_map.update(sub_map)
                         except Exception as sub_e:
                             failed_chunks += 1

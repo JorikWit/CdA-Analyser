@@ -38,6 +38,7 @@ from icon import LOGO_BASE64
 from fit_parser import FITParser
 from analyzer import CDAAnalyzer
 from weather import WeatherService
+from elevation import ElevationService
 from config import DEFAULT_PARAMETERS
 
 _CRASH_APP = None
@@ -195,15 +196,15 @@ class WorkerThread(QThread):
 
         if use_api and has_api_altitude:
             self.ride_data['altitude'] = self.ride_data['altitude_api']
-            self.analyzer.elevation_source = 'Open-Elevation API (preloaded at file load)'
-            self._emit_status("Elevation source: Open-Elevation API (preloaded)")
+            self.analyzer.elevation_source = 'Open-Elevation API (fetched at file load)'
+            self._emit_status("Elevation source: Open-Elevation API (fetched at file load)")
             return
 
         if 'altitude_fit' in self.ride_data.columns:
             self.ride_data['altitude'] = self.ride_data['altitude_fit']
         self.analyzer.elevation_source = 'FIT file'
         if use_api and not has_api_altitude:
-            self._emit_status("Elevation API selected, but no preloaded API altitude found: using FIT altitude")
+            self._emit_status("Elevation API selected, but no API altitude found for current file load: using FIT altitude")
         else:
             self._emit_status("Elevation source: FIT file")
 
@@ -828,6 +829,17 @@ class GUIInterface(QMainWindow):
             # Save current parameters from UI (including checkbox state) BEFORE loading
             self._save_parameters()
 
+            # Hard reset all previous data so reload starts from a clean state.
+            uncleared = self._clear_all_loaded_data_for_reload()
+            if uncleared:
+                self.file_status.append(
+                    "Reload cleanup warning: not cleared -> " + ", ".join(uncleared) + "\n"
+                )
+            else:
+                self.file_status.append(
+                    "Reload cleanup: all previous segment/power/speed/FIT/elevation/weather data cleared\n"
+                )
+
             use_weather_api_on_load = bool(self.load_weather_api_checkbox.isChecked())
             use_elevation_api_on_load = bool(self.load_elevation_api_checkbox.isChecked())
 
@@ -836,9 +848,13 @@ class GUIInterface(QMainWindow):
             self.preloaded_weather_samples = []
 
             fit_parser = FITParser()
+            # Force a fresh API fetch on every file load/reload when enabled.
+            elevation_service = ElevationService() if use_elevation_api_on_load else None
             self.ride_data = fit_parser.parse_fit_file(
                 self.fit_file_path,
                 use_open_elevation_api=use_elevation_api_on_load,
+                elevation_service=elevation_service,
+                status_callback=lambda msg: self.file_status.append(msg),
             )
             elev_source = fit_parser.elevation_source
             self.file_status.append(f"Successfully loaded {len(self.ride_data)} data points\n")
@@ -849,7 +865,7 @@ class GUIInterface(QMainWindow):
                     self.ride_data['altitude_api'].notna().any()
                 )
                 if self.elevation_api_loaded:
-                    self.file_status.append("Elevation API done: preloaded altitude available\n")
+                    self.file_status.append("Elevation API done: fresh altitude fetched for current file\n")
                 else:
                     self.file_status.append("Elevation API selected but no altitude API data available\n")
             else:
@@ -888,6 +904,62 @@ class GUIInterface(QMainWindow):
         """
         return not (self.worker is not None and self.worker.isRunning())
 
+    def _clear_all_loaded_data_for_reload(self):
+        """Clear all cached ride, segment, analysis, and API-derived state.
+
+        Returns:
+            list[str]: Human-readable names of fields that still contained data
+            after cleanup (best-effort verification).
+        """
+        # Data frames/results
+        self.ride_data = None
+        self.analysis_results = None
+        self.preprocessed_segments = None
+        self.simulation_results = None
+        self.segment_data_map = {}
+
+        # API preload state
+        self.weather_api_loaded = False
+        self.elevation_api_loaded = False
+        self.preloaded_weather_samples = []
+
+        # Analyzer-side caches/state
+        if self.analyzer is not None:
+            self.analyzer.weather_cache = {}
+            self.analyzer.preloaded_weather_samples = []
+            self.analyzer.allow_runtime_weather_fetch = False
+            self.analyzer.elevation_source = None
+
+        # Clear shown results to avoid stale UI references after reload.
+        self._cleanup_results(full_reset=True)
+
+        uncleared = []
+        if self.ride_data is not None:
+            uncleared.append("fit_data")
+        if self.preprocessed_segments:
+            uncleared.append("segments")
+        if self.analysis_results:
+            uncleared.append("analysis_summary")
+        if self.simulation_results:
+            uncleared.append("simulation_results")
+        if self.segment_data_map:
+            uncleared.append("segment_mapping")
+        if self.preloaded_weather_samples:
+            uncleared.append("api_weather")
+        if self.weather_api_loaded:
+            uncleared.append("weather_flag")
+        if self.elevation_api_loaded:
+            uncleared.append("elevation_flag")
+        if self.analyzer is not None:
+            if self.analyzer.weather_cache:
+                uncleared.append("analyzer_weather_cache")
+            if self.analyzer.preloaded_weather_samples:
+                uncleared.append("analyzer_preloaded_weather")
+            if self.analyzer.elevation_source is not None:
+                uncleared.append("analyzer_elevation_source")
+
+        return uncleared
+
     def _save_parameters(self):
         try:
             for key, entry in self.param_entries.items():
@@ -925,7 +997,7 @@ class GUIInterface(QMainWindow):
         """Keep API parameter checkboxes enabled and add availability hints.
 
         These checkboxes are calculation switches and should stay user-controllable
-        even when no preloaded API data exists.
+        even when no API data was fetched at file load.
         """
         weather_key = 'use_weather_api'
         elevation_key = 'use_open_elevation_api'
@@ -934,17 +1006,17 @@ class GUIInterface(QMainWindow):
             checkbox = self.param_checkboxes[weather_key]
             checkbox.setEnabled(True)
             if self.weather_api_loaded:
-                checkbox.setToolTip("Weather API data preloaded and available")
+                checkbox.setToolTip("Weather API data fetched at file load and available")
             else:
-                checkbox.setToolTip("No preloaded weather API data; calculation falls back to no wind")
+                checkbox.setToolTip("No weather API data fetched at file load; calculation falls back to no wind")
 
         if elevation_key in self.param_checkboxes:
             checkbox = self.param_checkboxes[elevation_key]
             checkbox.setEnabled(True)
             if self.elevation_api_loaded:
-                checkbox.setToolTip("Elevation API data preloaded and available")
+                checkbox.setToolTip("Elevation API data fetched at file load and available")
             else:
-                checkbox.setToolTip("No preloaded elevation API data; calculation falls back to FIT altitude")
+                checkbox.setToolTip("No elevation API data fetched at file load; calculation falls back to FIT altitude")
 
     def _prefetch_weather_api_on_load(self):
         """Prefetch weather data for the full route at 3km local-time intervals."""

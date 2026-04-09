@@ -11,7 +11,7 @@ class FITParser:
         self.logger = logging.getLogger(__name__)
         self.elevation_source = None  # Track which elevation source was used
     
-    def parse_fit_file(self, file_path, use_open_elevation_api=False, elevation_service=None):
+    def parse_fit_file(self, file_path, use_open_elevation_api=False, elevation_service=None, status_callback=None):
         """
         Parse a FIT file and extract relevant ride data
         
@@ -56,7 +56,7 @@ class FITParser:
                 elevation_service = ElevationService()
             
             # Process and clean data
-            df = self._process_data(df, use_open_elevation_api, elevation_service)
+            df = self._process_data(df, use_open_elevation_api, elevation_service, status_callback=status_callback)
             
             return df
             
@@ -64,7 +64,7 @@ class FITParser:
             self.logger.error(f"Error parsing FIT file: {e}")
             raise
     
-    def _process_data(self, df, use_open_elevation_api=False, elevation_service=None):
+    def _process_data(self, df, use_open_elevation_api=False, elevation_service=None, status_callback=None):
         """Process raw FIT data into usable format
         
         Args:
@@ -93,7 +93,11 @@ class FITParser:
         
         # Try to fetch elevations from Open-Elevation API
         if use_open_elevation_api:
-            df = self.apply_open_elevation_to_dataframe(df, elevation_service=elevation_service)
+            df = self.apply_open_elevation_to_dataframe(
+                df,
+                elevation_service=elevation_service,
+                status_callback=status_callback,
+            )
         else:
             self.elevation_source = 'FIT file'
         
@@ -143,7 +147,10 @@ class FITParser:
             if status_callback:
                 status_callback(f"Elevation API request: unique_coords={len(coordinates)}")
 
-            elevation_map = elevation_service.get_elevations_batch(coordinates)
+            elevation_map = elevation_service.get_elevations_batch(
+                coordinates,
+                status_callback=status_callback,
+            )
 
             if elevation_map:
                 def get_elevation(row):

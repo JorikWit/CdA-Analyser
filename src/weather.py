@@ -3,6 +3,7 @@
 import requests
 import pandas as pd
 import numpy as np
+import json
 from datetime import datetime, timedelta
 import logging
 from config import OPEN_METEO_URL_FORCAST, OPEN_METEO_URL_ARCIVE
@@ -34,7 +35,7 @@ class WeatherService:
             return next_i
         return prev_i
     
-    def get_weather_data(self, latitude, longitude, timestamp):
+    def get_weather_data(self, latitude, longitude, timestamp, status_callback=None):
         """
         Get weather data for a specific location and time
         
@@ -79,6 +80,9 @@ class WeatherService:
             response.raise_for_status()
             
             data = response.json()
+            if status_callback:
+                raw = json.dumps(data, ensure_ascii=True, separators=(',', ':'))
+                status_callback(f"Weather API raw response: {raw[:3000]}")
             
             # Extract hourly data
             hourly_data = data['hourly']
@@ -181,7 +185,12 @@ class WeatherService:
 
         grouped_results = {}
         for key, (lat, lon, ts_local) in grouped_points.items():
-            grouped_results[key] = self.get_weather_data(lat, lon, ts_local)
+            grouped_results[key] = self.get_weather_data(
+                lat,
+                lon,
+                ts_local,
+                status_callback=status_callback,
+            )
 
         for sample in samples:
             sample['weather_data'] = grouped_results.get(sample['group_key'])
