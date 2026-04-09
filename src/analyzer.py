@@ -228,6 +228,17 @@ class CDAAnalyzer:
         v_ground = averages['speed']
         v_wind   = wavg('effective_wind')
         v_air    = wavg('air_speed')
+        
+        # Calculate yaw angle using weighted averages
+        yaw_angles = [self._calculate_yaw_angle(
+            r.get('wind_speed', 0),
+            r.get('wind_angle', 0),
+            r.get('speed', 0),
+            r.get('effective_wind', 0)
+        ) for r in sub_results]
+        
+        # Weight-average the yaw values (circular mean not needed for yaw since it's typically small)
+        avg_yaw = float(np.average(yaw_angles, weights=weights)) if yaw_angles else 0.0
 
         return {
             'cda':          final_cda,
@@ -245,6 +256,7 @@ class CDAAnalyzer:
             'effective_wind': v_wind,
             'air_speed':    v_air,
             'wind_angle':   avg_wind_angle,
+            'yaw':          avg_yaw,    # Crosswind angle from rider perspective
             'subsegments':  sub_results,
             **averages,
         }
@@ -604,6 +616,52 @@ class CDAAnalyzer:
                         f"Gradient: {gradient.mean():.1f}W, "
                         f"Inertial: {inertial.mean():.1f}W")
     
+    def _calculate_yaw_angle(self, wind_speed, wind_angle_deg, v_ground, effective_wind):
+        """Calculate yaw angle (crosswind angle from rider's perspective).
+        
+        Yaw is the angle at which the rider perceives the wind coming from relative
+        to their forward direction. For example:
+        - 0° = pure headwind (straight ahead)
+        - 90° = pure crosswind from right
+        - -90° = pure crosswind from left
+        
+        Args:
+            wind_speed: magnitude of wind in m/s
+            wind_angle_deg: angle of wind relative to direction of travel (-180 to 180)
+            v_ground: ground speed in m/s
+            effective_wind: wind component along travel direction (includes wind_effect_factor)
+        
+        Returns:
+            yaw angle in degrees
+        """
+        if wind_speed <= 0:
+            return 0.0
+        
+        wind_angle_rad = math.radians(wind_angle_deg)
+        
+        # Forward velocity from rider perspective (relative to air)
+        v_forward = v_ground + effective_wind
+        if v_forward < 0.1:
+            v_forward = 0.1  # Avoid division issues
+        
+        # Crosswind velocity: perpendicular component of actual wind
+        # effective_wind already includes wind_effect_factor, so we need to recover true wind speed
+        wind_effect_factor = self.parameters.get('wind_effect_factor', 1.0)
+        
+        if abs(math.cos(wind_angle_rad)) < 0.01:  # Near ±90°
+            wind_speed_eff = abs(effective_wind) / wind_effect_factor if wind_effect_factor > 0 else wind_speed
+        else:
+            wind_speed_eff = effective_wind / (math.cos(wind_angle_rad) * wind_effect_factor)
+        
+        # Crosswind component from the original wind
+        v_cross = wind_speed_eff * math.sin(wind_angle_rad)
+        
+        # Yaw angle
+        yaw_rad = math.atan2(v_cross, v_forward)
+        yaw_deg = math.degrees(yaw_rad)
+        
+        return yaw_deg
+    
     # ============ Wind Effects Calculation ============
     
     def _calculate_wind_effects(self, segment_df, wind_speed, wind_direction, bike_speed):
@@ -654,7 +712,8 @@ class CDAAnalyzer:
             return {
                 'effective_wind': effective_wind,
                 'air_speed': air_speed,
-                'wind_angle': wind_angle_deg
+                'wind_angle': wind_angle_deg,
+                'wind_speed': wind_speed
             }
         
         except Exception as e:
@@ -710,7 +769,8 @@ class CDAAnalyzer:
         return {
             'effective_wind': effective_wind,
             'air_speed': air_speed,
-            'wind_angle': 0.0
+            'wind_angle': 0.0,
+            'wind_speed': wind_speed
         }
     
     # ============ CdA Calculation Methods ============

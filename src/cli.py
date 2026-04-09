@@ -110,10 +110,10 @@ def _display_results(results):
     
     # Print segment results
     print(f"\nSegment Analysis ({len(results['segments'])} steady segments found):")
-    print("-" * 140)
-    print(f"{'ID':<3} {'Dur':>6} {'Dist':>8} {'v_g':>6} {'v_w':>6} {'v_a':>6} {'Angle':>6} {'Slope':>6} {'Power':>6} {'CdA':>7}")
-    print(f"{'':3} {'(s)':>6} {'(m)':>8} {'(m/s)':>6} {'(m/s)':>6} {'(m/s)':>6} {'(deg)':>6} {'(deg)':>6} {'(W)':>6} {'':>7}")
-    print("-" * 140)
+    print("-" * 160)
+    print(f"{'ID':<3} {'Dur':>6} {'Dist':>8} {'v_g':>6} {'v_w':>6} {'v_a':>6} {'Angle':>6} {'Yaw':>5} {'Slope':>6} {'Power':>6} {'CdA':>7}")
+    print(f"{'':3} {'(s)':>6} {'(m)':>8} {'(m/s)':>6} {'(m/s)':>6} {'(m/s)':>6} {'(deg)':>6} {'(deg)':>5} {'(deg)':>6} {'(W)':>6} {'':>7}")
+    print("-" * 160)
 
     for segment in results['segments']:
         print(f"{segment['segment_id']:<3} "
@@ -123,6 +123,7 @@ def _display_results(results):
               f"{segment.get('v_wind', segment['effective_wind']):>+6.2f} "
               f"{segment.get('v_air', segment['air_speed']):>6.2f} "
               f"{segment['wind_angle']:>6.0f} "
+              f"{segment.get('yaw', 0.0):>5.1f} "
               f"{segment['slope']:>6.1f} "
               f"{segment['power']:>6.0f} "
               f"{segment['cda']:>7.4f} ")

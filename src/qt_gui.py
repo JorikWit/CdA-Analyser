@@ -1102,28 +1102,31 @@ class GUIInterface(QMainWindow):
         t.append("-" * 250)
         use_api = self.parameters.get('use_open_elevation_api', False)
         if use_api:
-            t.append(f"{'ID':<3}\t{'Dur':>6}\t{'Dist':>8}\t{'Elev FIT':>8}\t{'Elev API':>8}\t{'v_g':>6}\t{'v_w':>7}\t{'v_a':>6}\t{'Angle':>6}\t{'Slope':>6}\t{'Power':>6}\t{'CdA':>7}")
-            t.append(f"{'':3}\t{'(s)':>6}\t{'(m)':>8}\t{'(m)':>8}\t{'(m)':>8}\t{'m/s':>6}\t{'m/s':>7}\t{'m/s':>6}\t{'(deg)':>6}\t{'(deg)':>6}\t{'(W)':>6}\t{'':>7}")
+            t.append(f"{'ID':<3}\t{'Dur':>6}\t{'Dist':>8}\t{'Elev FIT':>8}\t{'Elev API':>8}\t{'v_g':>6}\t{'v_w':>7}\t{'v_a':>6}\t{'w_angle':>6}\t{'Yaw':>5}\t{'Slope':>6}\t{'Power':>6}\t{'CdA':>7}")
+            t.append(f"{'':3}\t{'(s)':>6}\t{'(m)':>8}\t{'(m)':>8}\t{'(m)':>8}\t{'m/s':>6}\t{'m/s':>7}\t{'m/s':>6}\t{'(deg)':>6}\t{'(deg)':>5}\t{'(deg)':>6}\t{'(W)':>6}\t{'':>7}")
         else:
-            t.append(f"{'ID':<3}\t{'Dur':>6}\t{'Dist':>8}\t{'Elev':>6}\t{'v_g':>6}\t{'v_w':>7}\t{'v_a':>6}\t{'Angle':>6}\t{'Slope':>6}\t{'Power':>6}\t{'CdA':>7}")
-            t.append(f"{'':3}\t{'(s)':>6}\t{'(m)':>8}\t{'(m)':>6}\t{'m/s':>6}\t{'m/s':>7}\t{'m/s':>6}\t{'(deg)':>6}\t{'(deg)':>6}\t{'(W)':>6}\t{'':>7}")
+            t.append(f"{'ID':<3}\t{'Dur':>6}\t{'Dist':>8}\t{'Elev':>6}\t{'v_g':>6}\t{'v_w':>7}\t{'v_a':>6}\t{'w_angle':>6}\t{'Yaw':>5}\t{'Slope':>6}\t{'Power':>6}\t{'CdA':>7}")
+            t.append(f"{'':3}\t{'(s)':>6}\t{'(m)':>8}\t{'(m)':>6}\t{'m/s':>6}\t{'m/s':>7}\t{'m/s':>6}\t{'(deg)':>6}\t{'(deg)':>5}\t{'(deg)':>6}\t{'(W)':>6}\t{'':>7}")
         t.append("-" * 250)
         s = r['summary'] if r.get('summary') else {}
         for s in r['segments']:
+            # Use precomputed yaw from analyzer
+            yaw = s.get('yaw', 0.0)
+            
             if use_api:
                 fit_str = f"{s['start_elevation_fit']:>8.0f}" if s.get('start_elevation_fit') is not None else f"{'N/A':>8}"
                 api_str = f"{s['start_elevation_api']:>8.0f}" if s.get('start_elevation_api') is not None else f"{'N/A':>8}"
                 t.append(
                     f"{s['segment_id']:<3}\t{s['duration']:>6.0f}\t{s['distance']:>8.0f}\t"
                     f"{fit_str}\t{api_str}\t{s.get('v_ground', s['speed']):>6.2f}\t{s.get('v_wind', s['effective_wind']):>+7.2f}\t{s.get('v_air', s['air_speed']):>6.2f}\t"
-                    f"{s['wind_angle']:>6.0f}\t{s['slope']:>6.1f}\t{s['power']:>6.0f}\t{s['cda']:>7.4f}"
+                    f"{s['wind_angle']:>6.0f}\t{yaw:>5.1f}\t{s['slope']:>6.1f}\t{s['power']:>6.0f}\t{s['cda']:>7.4f}"
                 )
             else:
                 elev_str = f"{s['start_elevation']:>6.0f}" if s.get('start_elevation') is not None else f"{'N/A':>6}"
                 t.append(
                     f"{s['segment_id']:<3}\t{s['duration']:>6.0f}\t{s['distance']:>8.0f}\t"
                     f"{elev_str}\t{s.get('v_ground', s['speed']):>6.2f}\t{s.get('v_wind', s['effective_wind']):>+7.2f}\t{s.get('v_air', s['air_speed']):>6.2f}\t"
-                    f"{s['wind_angle']:>6.0f}\t{s['slope']:>6.1f}\t{s['power']:>6.0f}\t{s['cda']:>7.4f}"
+                    f"{s['wind_angle']:>6.0f}\t{yaw:>5.1f}\t{s['slope']:>6.1f}\t{s['power']:>6.0f}\t{s['cda']:>7.4f}"
                 )
         t.append("\nSummary:")
         t.append("-" * 100)
@@ -1253,47 +1256,59 @@ class GUIInterface(QMainWindow):
                 self.current_figure = Figure(figsize=(16, 10))
             else:
                 self.current_figure.clear()
-            gs = self.current_figure.add_gridspec(3, 2, hspace=0.4, wspace=0.3)
+            gs = self.current_figure.add_gridspec(3, 2, hspace=0.45, wspace=0.3)
 
-            # --- 1. Speed vs Distance ---
+            cda_vals = [s['cda'] for s in segments]
+            air_speeds = [s.get('air_speed', 0) for s in segments]
+            seg_ids = [s['segment_id'] for s in segments]
+            speeds = [s['speed'] for s in segments]
+            powers = [s['power'] for s in segments]
+            yaw_vals = [s.get('yaw', 0.0) for s in segments]
+            wind_angles = [s.get('wind_angle', 0) for s in segments]
+
+            # --- 1. Speed + Power vs Distance ---
             ax1 = self.current_figure.add_subplot(gs[0, 0])
-            ax1.plot(self.ride_data['distance']/1000, self.ride_data['speed'], 'lightgray', alpha=0.5, lw=1)
+            ax1.plot(self.ride_data['distance']/1000, self.ride_data['speed'], 'lightgray', alpha=0.5, lw=1, label='Full ride (speed)')
             for i, s in enumerate(segments):
                 idx = self.segment_data_map.get(s['segment_id'], [])
                 if not idx: continue
                 d = self.ride_data.iloc[idx]
                 ax1.plot(d['distance']/1000, d['speed'], color=colors[i], lw=2, alpha=0.9, label=f"Seg {s['segment_id']}")
-            ax1.set_title('Speed vs distance', fontsize=10, fontweight='bold')
+            ax1.set_title('Speed + Power vs Distance', fontsize=10, fontweight='bold')
             ax1.set_xlabel('Distance (km)', fontsize=8)
-            ax1.set_ylabel('Speed (m/s)', fontsize=8)
+            ax1.set_ylabel('Speed (m/s)', fontsize=8, color='blue')
+            ax1.tick_params(axis='y', labelcolor='blue', labelsize=8)
             ax1.tick_params(axis='x', labelsize=6)
             ax1.grid(True, alpha=0.3)
             if len(segments) <= 10:
-                ax1.legend(fontsize=6, loc='upper right')
-
-            # --- 2. Power vs Distance ---
-            ax2 = self.current_figure.add_subplot(gs[0, 1])
-            ax2.plot(self.ride_data['distance']/1000, self.ride_data['power'], 'lightgray', alpha=0.5, lw=1)
+                ax1.legend(fontsize=6, loc='upper left')
+            ax1_r = ax1.twinx()
+            ax1_r.plot(self.ride_data['distance']/1000, self.ride_data['power'], color='orange', alpha=0.5, lw=1)
             for i, s in enumerate(segments):
                 idx = self.segment_data_map.get(s['segment_id'], [])
                 if not idx: continue
                 d = self.ride_data.iloc[idx]
-                ax2.plot(d['distance']/1000, d['power'], color=colors[i], lw=2, alpha=0.9)
-            ax2.set_title('Power vs distance', fontsize=10, fontweight='bold')
-            ax2.set_xlabel('Distance (km)', fontsize=8)
-            ax2.set_ylabel('Power (W)', fontsize=8)
-            ax2.tick_params(axis='x', labelsize=6)
-            ax2.grid(True, alpha=0.3)
+                ax1_r.plot(d['distance']/1000, d['power'], color=colors[i], lw=2.5, alpha=0.8, linestyle='--')
+            ax1_r.set_ylabel('Power (W)', fontsize=8, color='red')
+            ax1_r.tick_params(axis='y', labelcolor='red', labelsize=8)
+
+            # --- 2. CdA by Segment ---
+            ax2 = self.current_figure.add_subplot(gs[0, 1])
+            bars = ax2.bar(seg_ids, cda_vals, color=colors, alpha=0.8, edgecolor='k', linewidth=0.7)
+            ax2.set_title('CdA by Segment', fontsize=10, fontweight='bold')
+            ax2.set_xlabel('Segment ID', fontsize=8)
+            ax2.set_ylabel('CdA', fontsize=8)
+            ax2.tick_params(axis='x', labelsize=9)
+            ax2.grid(True, axis='y', alpha=0.3)
+            for bar, cda in zip(bars, cda_vals):
+                ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001,
+                         f'{cda:.3f}', ha='center', fontsize=5)
 
             # --- 3. CdA vs Air Speed ---
             ax3 = self.current_figure.add_subplot(gs[1, 0])
-            cda_vals = [s['cda'] for s in segments]
-            air_speeds = [s.get('air_speed', 0) for s in segments]
-            seg_ids = [s['segment_id'] for s in segments]
             ax3.scatter(air_speeds, cda_vals, c=colors, s=100, alpha=0.8, edgecolors='k', linewidth=0.5)
             for i, sid in enumerate(seg_ids):
-                ax3.annotate(str(sid), (air_speeds[i], cda_vals[i]), xytext=(5,5), textcoords='offset points',
-                            fontsize=6, alpha=0.8)
+                ax3.annotate(str(sid), (air_speeds[i], cda_vals[i]), xytext=(5, 5), textcoords='offset points', fontsize=6, alpha=0.8)
             ax3.set_title('CdA vs Air Speed', fontsize=10, fontweight='bold')
             ax3.set_xlabel('Air Speed (m/s)', fontsize=8)
             ax3.set_ylabel('CdA', fontsize=8)
@@ -1301,88 +1316,70 @@ class GUIInterface(QMainWindow):
 
             # --- 4. Speed vs Power ---
             ax4 = self.current_figure.add_subplot(gs[1, 1])
-            speeds = [s['speed'] for s in segments]
-            powers = [s['power'] for s in segments]
             ax4.scatter(speeds, powers, c=colors, s=100, alpha=0.8, edgecolors='k', linewidth=0.5)
             for i, sid in enumerate(seg_ids):
-                ax4.annotate(str(sid), (speeds[i], powers[i]), xytext=(5,5), textcoords='offset points',
-                            fontsize=6, alpha=0.8)
-            ax4.set_title('Segment Speed vs Power', fontsize=10, fontweight='bold')
+                ax4.annotate(str(sid), (speeds[i], powers[i]), xytext=(5, 5), textcoords='offset points', fontsize=6, alpha=0.8)
+            ax4.set_title('Speed vs Power', fontsize=10, fontweight='bold')
             ax4.set_xlabel('Speed (m/s)', fontsize=8)
             ax4.set_ylabel('Power (W)', fontsize=8)
             ax4.grid(True, alpha=0.3)
 
-            # --- 5. CdA by Segment ---
+            # --- 5. CdA vs Yaw ---
             ax5 = self.current_figure.add_subplot(gs[2, 0])
-            bars = ax5.bar(seg_ids, cda_vals, color=colors, alpha=0.8, edgecolor='k', linewidth=0.7)
-            ax5.set_title('CdA by Segment', fontsize=10, fontweight='bold')
-            ax5.set_xlabel('Segment ID', fontsize=8)
+            sc5 = ax5.scatter(yaw_vals, cda_vals, c=air_speeds, cmap='viridis', s=100, alpha=0.8, edgecolors='k', linewidth=0.5)
+            mask_20 = [abs(y) <= 20 for y in yaw_vals]
+            yv20 = [yaw_vals[i] for i in range(len(yaw_vals)) if mask_20[i]]
+            cv20 = [cda_vals[i] for i in range(len(cda_vals)) if mask_20[i]]
+            if len(set([round(y, 1) for y in yv20])) >= 3:
+                co = np.polyfit(yv20, cv20, 2)
+                ax5.plot(np.linspace(-20, 20, 200), np.poly1d(co)(np.linspace(-20, 20, 200)), color='red', lw=1.5)
+                ax5.text(0.95, 0.05, f"y={co[0]:.3e}x\u00b2+{co[1]:.3e}x+{co[2]:.3e}", transform=ax5.transAxes,
+                         fontsize=7, color='red', ha='right', va='bottom', bbox=dict(facecolor='white', alpha=0.6))
+            for i, sid in enumerate(seg_ids):
+                ax5.annotate(str(sid), (yaw_vals[i], cda_vals[i]), xytext=(5, 5), textcoords='offset points', fontsize=6, alpha=0.8)
+            ax5.set_title('CdA vs Yaw Angle', fontsize=10, fontweight='bold')
+            ax5.set_xlabel('Yaw (\u00b0) \u2014 Crosswind from rider perspective', fontsize=8)
             ax5.set_ylabel('CdA', fontsize=8)
-            ax5.tick_params(axis='x', labelsize=9)
-            ax5.grid(True, axis='y', alpha=0.3)
-            for bar, cda in zip(bars, cda_vals):
-                ax5.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001,
-                         f'{cda:.3f}', ha='center', fontsize=5)
+            ax5.set_xlim(-20, 20)
+            ax5.set_xticks([-20, -10, 0, 10, 20])
+            ax5.grid(True, alpha=0.3)
+            self.current_figure.colorbar(sc5, ax=ax5).set_label('Air Speed (m/s)', fontsize=8)
 
             # --- 6. CdA vs Wind Angle ---
             ax6 = self.current_figure.add_subplot(gs[2, 1])
-            wind_angles = [s.get('wind_angle', 0) for s in segments]
-            cda_vals = [s['cda'] for s in segments]
-            air_speeds = [s.get('air_speed', 0) for s in segments]
-            for i in range(len(wind_angles)):
-                if wind_angles[i] > 180:
-                    wind_angles[i] -= 360
-                if wind_angles[i] < -180:
-                    wind_angles[i] += 360
-            sc = ax6.scatter(wind_angles, cda_vals, c=air_speeds, cmap='viridis', s=100,
-                             alpha=0.8, edgecolors='k', linewidth=0.5)
-            # Only attempt polyfit when there are enough distinct angle values
-            if len(set(wind_angles)) > 2:
-                coeffs = np.polyfit(wind_angles, cda_vals, 2)
-                poly = np.poly1d(coeffs)
-                x_fit = np.linspace(-180, 180, 300)
-                ax6.plot(x_fit, poly(x_fit), color='red', lw=1.0)
-                formula = f"y = {coeffs[0]:.3e}x\u00b2 + {coeffs[1]:.3e}x + {coeffs[2]:.3e}"
-                ax6.text(0.95, 0.05, formula, transform=ax6.transAxes, fontsize=7, color='red',
-                         ha='right', va='bottom', bbox=dict(facecolor='white', alpha=0.6))
-            ax6.set_title('CdA vs Air Angle', fontsize=10, fontweight='bold')
-            ax6.set_xlabel('Air Angle (°)', fontsize=8)
-            ax6.set_ylabel('CdA', fontsize=8)
-            ax6.grid(True, alpha=0.3)
-            ax6.set_xlim(-180, 180)
-            ax6.set_xticks([-180, -90, 0, 90, 180])
+            sc6 = ax6.scatter(wind_angles, cda_vals, c=air_speeds, cmap='viridis', s=100, alpha=0.8, edgecolors='k', linewidth=0.5)
+            if len(set([round(w, 1) for w in wind_angles])) >= 3:
+                co6 = np.polyfit(wind_angles, cda_vals, 2)
+                x6 = np.linspace(-180, 180, 300)
+                ax6.plot(x6, np.poly1d(co6)(x6), color='red', lw=1.5)
+                ax6.text(0.98, 0.05, f"y={co6[0]:.3e}x\u00b2+{co6[1]:.3e}x+{co6[2]:.3e}", transform=ax6.transAxes,
+                         fontsize=7, color='red', ha='right', va='bottom', bbox=dict(facecolor='white', alpha=0.6))
             for i, sid in enumerate(seg_ids):
-                ax6.annotate(str(sid), (wind_angles[i], cda_vals[i]), xytext=(5,5), textcoords='offset points',
-                            fontsize=6, alpha=0.8)
-            self.current_figure.colorbar(sc, ax=ax6).set_label('Air Speed (m/s)', fontsize=8)
+                ax6.annotate(str(sid), (wind_angles[i], cda_vals[i]), xytext=(5, 5), textcoords='offset points', fontsize=6, alpha=0.8)
+            ax6.set_title('CdA vs Wind Angle', fontsize=10, fontweight='bold')
+            ax6.set_xlabel('Wind Angle (\u00b0) — Headwind [\u00b1180\u00b0], Tailwind [0\u00b0]', fontsize=8)
+            ax6.set_ylabel('CdA', fontsize=8)
+            ax6.set_xlim(-180, 180)
+            ax6.set_xticks([-180, -135, -90, -45, 0, 45, 90, 135, 180])
+            ax6.grid(True, alpha=0.3)
+            self.current_figure.colorbar(sc6, ax=ax6).set_label('Air Speed (m/s)', fontsize=8)
 
-            # Summary text (show both all-segment and keep-x% weighted CdA)
+            # Summary text
             weighted_metrics = self.analyzer._calculate_weighted_cda_metrics(segments)
-            weighted_all = weighted_metrics['weighted_cda_all']
             weighted_kept = weighted_metrics['weighted_cda_kept']
             keep_percent = weighted_metrics['keep_percent']
-            kept_used = weighted_metrics['kept_segments_used']
-            avg_cda = np.mean(cda_vals)
             std_cda = np.std(cda_vals)
             total_distance = sum(s['distance'] for s in segments) / 1000
             summary = (
-                #f"Weighted CdA all: {weighted_all:.3f}\n"
                 f"Weighted CdA {keep_percent:.0f}%: {weighted_kept:.3f}\n"
-                #f"Average CdA: {avg_cda:.3f}\n"
                 f"CdA Std Dev: {std_cda:.3f}\n"
                 f"Total Distance: {total_distance:.1f} km"
             )
-            self.current_figure.text(0.45, 0.0825, summary, ha='center', va='top', fontsize=9, fontweight='bold',
+            self.current_figure.text(0.45, 0.015, summary, ha='center', va='bottom', fontsize=9, fontweight='bold',
                                      bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.5'))
 
             self.current_figure.suptitle("CDA Analysis Plots", fontsize=12, fontweight='bold', y=0.99)
-
-            self.current_figure.subplots_adjust(
-                top=0.95,    # leave space for suptitle
-                bottom=0.12, # leave space for summary text
-                left=0.05,
-                right=0.98
-            )
+            self.current_figure.subplots_adjust(top=0.96, bottom=0.08, left=0.05, right=0.98)
 
             # Create canvas once; then reuse it for future draws.
             if self.current_canvas is None:
@@ -1553,32 +1550,35 @@ class GUIInterface(QMainWindow):
         t.append("-" * 250)
         if use_api:
             t.append(f"{'ID':<3}\t{'Dur':>6}\t{'Dist':>8}\t{'Elev FIT':>8}\t{'Elev API':>8}\t{'v_g':>6}\t{'v_w':>7}\t{'v_a':>6}\t"
-                    f"{'Angle':>6}\t{'Slope':>6}\t{'Power':>6}\t{'CdA':>7}")
+                    f"{'w_angle':>6}\t{'Yaw':>5}\t{'Slope':>6}\t{'Power':>6}\t{'CdA':>7}")
             t.append(f"{'':3}\t{'(s)':>6}\t{'(m)':>8}\t{'(m)':>8}\t{'(m)':>8}\t{'m/s':>6}\t{'m/s':>7}\t{'m/s':>6}\t"
-                    f"{'(deg)':>6}\t{'(deg)':>6}\t{'(W)':>6}\t{'':>7}")
+                    f"{'(deg)':>6}\t{'(deg)':>5}\t{'(deg)':>6}\t{'(W)':>6}\t{'':>7}")
         else:
             t.append(f"{'ID':<3}\t{'Dur':>6}\t{'Dist':>8}\t{'Elev':>6}\t{'v_g':>6}\t{'v_w':>7}\t{'v_a':>6}\t"
-                    f"{'Angle':>6}\t{'Slope':>6}\t{'Power':>6}\t{'CdA':>7}")
+                    f"{'w_angle':>6}\t{'Yaw':>5}\t{'Slope':>6}\t{'Power':>6}\t{'CdA':>7}")
             t.append(f"{'':3}\t{'(s)':>6}\t{'(m)':>8}\t{'(m)':>6}\t{'m/s':>6}\t{'m/s':>7}\t{'m/s':>6}\t"
-                    f"{'(deg)':>6}\t{'(deg)':>6}\t{'(W)':>6}\t{'':>7}")
+                    f"{'(deg)':>6}\t{'(deg)':>5}\t{'(deg)':>6}\t{'(W)':>6}\t{'':>7}")
         t.append("-" * 200)
 
         # --- Segment Rows ---
         for s in self.simulation_results:
+            # Use precomputed yaw from analyzer
+            yaw = s.get('yaw', 0.0)
+            
             if use_api:
                 fit_str = f"{s['start_elevation_fit']:>8.0f}" if s.get('start_elevation_fit') is not None else f"{'N/A':>8}"
                 api_str = f"{s['start_elevation_api']:>8.0f}" if s.get('start_elevation_api') is not None else f"{'N/A':>8}"
                 t.append(
                     f"{s['segment_id']:<3}\t{s['duration']:>6.0f}\t{s['distance']:>8.0f}\t"
                     f"{fit_str}\t{api_str}\t{s.get('v_ground', s['speed']):>6.2f}\t{s.get('v_wind', s['effective_wind']):>+7.2f}\t{s.get('v_air', s['air_speed']):>6.2f}\t"
-                    f"{s['wind_angle']:>6.0f}\t{s['slope']:>6.1f}\t{s['power']:>6.0f}\t{s['cda']:>7.4f}"
+                    f"{s['wind_angle']:>6.0f}\t{yaw:>5.1f}\t{s['slope']:>6.1f}\t{s['power']:>6.0f}\t{s['cda']:>7.4f}"
                 )
             else:
                 elev_str = f"{s['start_elevation']:>6.0f}" if s.get('start_elevation') is not None else f"{'N/A':>6}"
                 t.append(
                     f"{s['segment_id']:<3}\t{s['duration']:>6.0f}\t{s['distance']:>8.0f}\t"
                     f"{elev_str}\t{s.get('v_ground', s['speed']):>6.2f}\t{s.get('v_wind', s['effective_wind']):>+7.2f}\t{s.get('v_air', s['air_speed']):>6.2f}\t"
-                    f"{s['wind_angle']:>6.0f}\t{s['slope']:>6.1f}\t{s['power']:>6.0f}\t{s['cda']:>7.4f}"
+                    f"{s['wind_angle']:>6.0f}\t{yaw:>5.1f}\t{s['slope']:>6.1f}\t{s['power']:>6.0f}\t{s['cda']:>7.4f}"
                 )
 
         # --- Summary Section ---
@@ -1663,47 +1663,59 @@ class GUIInterface(QMainWindow):
                 self.sim_figure = Figure(figsize=(16, 10))
             else:
                 self.sim_figure.clear()
-            gs = self.sim_figure.add_gridspec(3, 2, hspace=0.4, wspace=0.3)
+            gs = self.sim_figure.add_gridspec(3, 2, hspace=0.45, wspace=0.3)
 
-            # --- 1. Speed vs Distance ---
+            cda_vals = [s['cda'] for s in segments]
+            air_speeds = [s.get('air_speed', 0) for s in segments]
+            seg_ids = [s['segment_id'] for s in segments]
+            speeds = [s['speed'] for s in segments]
+            powers = [s['power'] for s in segments]
+            yaw_vals = [s.get('yaw', 0.0) for s in segments]
+            wind_angles = [s.get('wind_angle', 0) for s in segments]
+
+            # --- 1. Speed + Power vs Distance ---
             ax1 = self.sim_figure.add_subplot(gs[0, 0])
-            ax1.plot(self.ride_data['distance']/1000, self.ride_data['speed'], 'lightgray', alpha=0.5, lw=1)
+            ax1.plot(self.ride_data['distance']/1000, self.ride_data['speed'], 'lightgray', alpha=0.5, lw=1, label='Full ride (speed)')
             for i, s in enumerate(segments):
                 idx = self.segment_data_map.get(s['segment_id'], [])
                 if not idx: continue
                 d = self.ride_data.iloc[idx]
                 ax1.plot(d['distance']/1000, d['speed'], color=colors[i], lw=2, alpha=0.9, label=f"Seg {s['segment_id']}")
-            ax1.set_title('Speed vs distance', fontsize=10, fontweight='bold')
+            ax1.set_title('Speed + Power vs Distance', fontsize=10, fontweight='bold')
             ax1.set_xlabel('Distance (km)', fontsize=8)
-            ax1.set_ylabel('Speed (m/s)', fontsize=8)
+            ax1.set_ylabel('Speed (m/s)', fontsize=8, color='blue')
+            ax1.tick_params(axis='y', labelcolor='blue', labelsize=8)
             ax1.tick_params(axis='x', labelsize=6)
             ax1.grid(True, alpha=0.3)
             if len(segments) <= 10:
-                ax1.legend(fontsize=6, loc='upper right')
-
-            # --- 2. Power vs Distance ---
-            ax2 = self.sim_figure.add_subplot(gs[0, 1])
-            ax2.plot(self.ride_data['distance']/1000, self.ride_data['power'], 'lightgray', alpha=0.5, lw=1)
+                ax1.legend(fontsize=6, loc='upper left')
+            ax1_r = ax1.twinx()
+            ax1_r.plot(self.ride_data['distance']/1000, self.ride_data['power'], color='orange', alpha=0.5, lw=1)
             for i, s in enumerate(segments):
                 idx = self.segment_data_map.get(s['segment_id'], [])
                 if not idx: continue
                 d = self.ride_data.iloc[idx]
-                ax2.plot(d['distance']/1000, d['power'], color=colors[i], lw=2, alpha=0.9)
-            ax2.set_title('Power vs distance', fontsize=10, fontweight='bold')
-            ax2.set_xlabel('Distance (km)', fontsize=8)
-            ax2.set_ylabel('Power (W)', fontsize=8)
-            ax2.tick_params(axis='x', labelsize=6)
-            ax2.grid(True, alpha=0.3)
+                ax1_r.plot(d['distance']/1000, d['power'], color=colors[i], lw=2.5, alpha=0.8, linestyle='--')
+            ax1_r.set_ylabel('Power (W)', fontsize=8, color='red')
+            ax1_r.tick_params(axis='y', labelcolor='red', labelsize=8)
+
+            # --- 2. CdA by Segment ---
+            ax2 = self.sim_figure.add_subplot(gs[0, 1])
+            bars = ax2.bar(seg_ids, cda_vals, color=colors, alpha=0.8, edgecolor='k', linewidth=0.7)
+            ax2.set_title('CdA by Segment', fontsize=10, fontweight='bold')
+            ax2.set_xlabel('Segment ID', fontsize=8)
+            ax2.set_ylabel('CdA', fontsize=8)
+            ax2.tick_params(axis='x', labelsize=9)
+            ax2.grid(True, axis='y', alpha=0.3)
+            for bar, cda in zip(bars, cda_vals):
+                ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001,
+                         f'{cda:.3f}', ha='center', fontsize=5)
 
             # --- 3. CdA vs Air Speed ---
             ax3 = self.sim_figure.add_subplot(gs[1, 0])
-            cda_vals = [s['cda'] for s in segments]
-            air_speeds = [s.get('air_speed', 0) for s in segments]
-            seg_ids = [s['segment_id'] for s in segments]
             ax3.scatter(air_speeds, cda_vals, c=colors, s=100, alpha=0.8, edgecolors='k', linewidth=0.5)
             for i, sid in enumerate(seg_ids):
-                ax3.annotate(str(sid), (air_speeds[i], cda_vals[i]), xytext=(5,5), textcoords='offset points',
-                            fontsize=6, alpha=0.8)
+                ax3.annotate(str(sid), (air_speeds[i], cda_vals[i]), xytext=(5, 5), textcoords='offset points', fontsize=6, alpha=0.8)
             ax3.set_title('CdA vs Air Speed', fontsize=10, fontweight='bold')
             ax3.set_xlabel('Air Speed (m/s)', fontsize=8)
             ax3.set_ylabel('CdA', fontsize=8)
@@ -1711,88 +1723,70 @@ class GUIInterface(QMainWindow):
 
             # --- 4. Speed vs Power ---
             ax4 = self.sim_figure.add_subplot(gs[1, 1])
-            speeds = [s['speed'] for s in segments]
-            powers = [s['power'] for s in segments]
             ax4.scatter(speeds, powers, c=colors, s=100, alpha=0.8, edgecolors='k', linewidth=0.5)
             for i, sid in enumerate(seg_ids):
-                ax4.annotate(str(sid), (speeds[i], powers[i]), xytext=(5,5), textcoords='offset points',
-                            fontsize=6, alpha=0.8)
-            ax4.set_title('Segment Speed vs Power', fontsize=10, fontweight='bold')
+                ax4.annotate(str(sid), (speeds[i], powers[i]), xytext=(5, 5), textcoords='offset points', fontsize=6, alpha=0.8)
+            ax4.set_title('Speed vs Power', fontsize=10, fontweight='bold')
             ax4.set_xlabel('Speed (m/s)', fontsize=8)
             ax4.set_ylabel('Power (W)', fontsize=8)
             ax4.grid(True, alpha=0.3)
 
-            # --- 5. CdA by Segment ---
+            # --- 5. CdA vs Yaw ---
             ax5 = self.sim_figure.add_subplot(gs[2, 0])
-            bars = ax5.bar(seg_ids, cda_vals, color=colors, alpha=0.8, edgecolor='k', linewidth=0.7)
-            ax5.set_title('CdA by Segment', fontsize=10, fontweight='bold')
-            ax5.set_xlabel('Segment ID', fontsize=8)
+            sc5 = ax5.scatter(yaw_vals, cda_vals, c=air_speeds, cmap='viridis', s=100, alpha=0.8, edgecolors='k', linewidth=0.5)
+            mask_20 = [abs(y) <= 20 for y in yaw_vals]
+            yv20 = [yaw_vals[i] for i in range(len(yaw_vals)) if mask_20[i]]
+            cv20 = [cda_vals[i] for i in range(len(cda_vals)) if mask_20[i]]
+            if len(set([round(y, 1) for y in yv20])) >= 3:
+                co = np.polyfit(yv20, cv20, 2)
+                ax5.plot(np.linspace(-20, 20, 200), np.poly1d(co)(np.linspace(-20, 20, 200)), color='red', lw=1.5)
+                ax5.text(0.95, 0.05, f"y={co[0]:.3e}x\u00b2+{co[1]:.3e}x+{co[2]:.3e}", transform=ax5.transAxes,
+                         fontsize=7, color='red', ha='right', va='bottom', bbox=dict(facecolor='white', alpha=0.6))
+            for i, sid in enumerate(seg_ids):
+                ax5.annotate(str(sid), (yaw_vals[i], cda_vals[i]), xytext=(5, 5), textcoords='offset points', fontsize=6, alpha=0.8)
+            ax5.set_title('CdA vs Yaw Angle', fontsize=10, fontweight='bold')
+            ax5.set_xlabel('Yaw (\u00b0) \u2014 Crosswind from rider perspective', fontsize=8)
             ax5.set_ylabel('CdA', fontsize=8)
-            ax5.tick_params(axis='x', labelsize=9)
-            ax5.grid(True, axis='y', alpha=0.3)
-            for bar, cda in zip(bars, cda_vals):
-                ax5.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001,
-                         f'{cda:.3f}', ha='center', fontsize=5)
+            ax5.set_xlim(-20, 20)
+            ax5.set_xticks([-20, -10, 0, 10, 20])
+            ax5.grid(True, alpha=0.3)
+            self.sim_figure.colorbar(sc5, ax=ax5).set_label('Air Speed (m/s)', fontsize=8)
 
             # --- 6. CdA vs Wind Angle ---
             ax6 = self.sim_figure.add_subplot(gs[2, 1])
-            wind_angles = [s.get('wind_angle', 0) for s in segments]
-            cda_vals = [s['cda'] for s in segments]
-            air_speeds = [s.get('air_speed', 0) for s in segments]
-            for i in range(len(wind_angles)):
-                if wind_angles[i] > 180:
-                    wind_angles[i] -= 360
-                if wind_angles[i] < -180:
-                    wind_angles[i] += 360
-
-            sc = ax6.scatter(wind_angles, cda_vals, c=air_speeds, cmap='viridis', s=100,
-                             alpha=0.8, edgecolors='k', linewidth=0.5)
-            if len(set(wind_angles)) > 2:
-                coeffs = np.polyfit(wind_angles, cda_vals, 2)
-                poly = np.poly1d(coeffs)
-                x_fit = np.linspace(-180, 180, 300)
-                ax6.plot(x_fit, poly(x_fit), color='red', lw=1.0)
-                formula = f"y = {coeffs[0]:.3e}x\u00b2 + {coeffs[1]:.3e}x + {coeffs[2]:.3e}"
-                ax6.text(0.95, 0.05, formula, transform=ax6.transAxes, fontsize=7, color='red',
-                         ha='right', va='bottom', bbox=dict(facecolor='white', alpha=0.6))
-            ax6.set_title('CdA vs Air Angle', fontsize=10, fontweight='bold')
-            ax6.set_xlabel('Air Angle (°)', fontsize=8)
-            ax6.set_ylabel('CdA', fontsize=8)
-            ax6.grid(True, alpha=0.3)
-            ax6.set_xlim(-180, 180)
-            ax6.set_xticks([-180, -90, 0, 90, 180])
+            sc6 = ax6.scatter(wind_angles, cda_vals, c=air_speeds, cmap='viridis', s=100, alpha=0.8, edgecolors='k', linewidth=0.5)
+            if len(set([round(w, 1) for w in wind_angles])) >= 3:
+                co6 = np.polyfit(wind_angles, cda_vals, 2)
+                x6 = np.linspace(-180, 180, 300)
+                ax6.plot(x6, np.poly1d(co6)(x6), color='red', lw=1.5)
+                ax6.text(0.98, 0.05, f"y={co6[0]:.3e}x\u00b2+{co6[1]:.3e}x+{co6[2]:.3e}", transform=ax6.transAxes,
+                         fontsize=7, color='red', ha='right', va='bottom', bbox=dict(facecolor='white', alpha=0.6))
             for i, sid in enumerate(seg_ids):
-                ax6.annotate(str(sid), (wind_angles[i], cda_vals[i]), xytext=(5,5), textcoords='offset points',
-                            fontsize=6, alpha=0.8)
-            self.sim_figure.colorbar(sc, ax=ax6)
+                ax6.annotate(str(sid), (wind_angles[i], cda_vals[i]), xytext=(5, 5), textcoords='offset points', fontsize=6, alpha=0.8)
+            ax6.set_title('CdA vs Wind Angle', fontsize=10, fontweight='bold')
+            ax6.set_xlabel('Wind Angle (\u00b0) \u2014 Headwind [\u00b1180\u00b0], Tailwind [0\u00b0]', fontsize=8)
+            ax6.set_ylabel('CdA', fontsize=8)
+            ax6.set_xlim(-180, 180)
+            ax6.set_xticks([-180, -135, -90, -45, 0, 45, 90, 135, 180])
+            ax6.grid(True, alpha=0.3)
+            self.sim_figure.colorbar(sc6, ax=ax6).set_label('Air Speed (m/s)', fontsize=8)
 
-            # Summary text (show both all-segment and keep-x% weighted CdA)
+            # Summary text
             weighted_metrics = self.analyzer._calculate_weighted_cda_metrics(segments)
-            weighted_all = weighted_metrics['weighted_cda_all']
             weighted_kept = weighted_metrics['weighted_cda_kept']
             keep_percent = weighted_metrics['keep_percent']
-            kept_used = weighted_metrics['kept_segments_used']
-            avg_cda = np.mean(cda_vals)
             std_cda = np.std(cda_vals)
             total_distance = sum(s['distance'] for s in segments) / 1000
             summary = (
-                #f"Weighted CdA all: {weighted_all:.3f}\n"
                 f"Weighted CdA ({keep_percent:.0f}%): {weighted_kept:.3f}\n"
-                #f"Average CdA: {avg_cda:.3f}\n"
                 f"CdA Std Dev: {std_cda:.3f}\n"
                 f"Total Distance: {total_distance:.1f} km"
             )
-            self.sim_figure.text(0.45, 0.0825, summary, ha='center', va='top', fontsize=9, fontweight='bold',
+            self.sim_figure.text(0.45, 0.015, summary, ha='center', va='bottom', fontsize=9, fontweight='bold',
                                      bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.5'))
 
             self.sim_figure.suptitle("Weather Simulation Plots", fontsize=12, fontweight='bold', y=0.99)
-
-            self.sim_figure.subplots_adjust(
-                top=0.95,
-                bottom=0.12,
-                left=0.05,
-                right=0.98
-            )
+            self.sim_figure.subplots_adjust(top=0.96, bottom=0.08, left=0.05, right=0.98)
 
             # Create canvas once; then reuse it for future draws.
             if self.sim_canvas is None:

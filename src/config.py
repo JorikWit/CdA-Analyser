@@ -11,13 +11,13 @@ DEFAULT_PARAMETERS = {
     'power_steady_threshold': 150.0,   # watts
     'slope_steady_threshold': 5.0,    # degrees
 
-    'cda_keep_percent': 80.0,       # iteratively remove largest abs CdA outliers until x% remains
+    'cda_keep_percent': 75.0,       # iteratively remove largest abs CdA outliers until x% remains
     'subsegment_min_duration_s': 5.0,   # seconds per sub-segment
     'subsegment_min_points':     5,     # minimum data-points per sub-segment
     'rider_mass': 75.0,  # kg
     'bike_mass': 10.0,   # kg
     'rolling_resistance': 0.003,
-    'drivetrain_loss': 0.025,
+    'drivetrain_loss': 0.0275,
     'wind_effect_factor' : 0.25, # (0.0 - 1.0)  look at cli angle +- 0 and angle 180 must be 0 -> +-0.20 cda diff +  CdA standard deviation < 0.05
     'use_open_elevation_api': False,  # Use Open-Elevation API for altitude data (batch request, all points in 1 call)
 
