@@ -434,7 +434,7 @@ class GUIInterface(QMainWindow):
         <b>GitHub:</b> <a href='https://github.com/JorikWit/CdA-Analyser'>https://github.com/JorikWit/CdA-Analyser</a><br><br>
 
         This program is licensed under the
-        GNU General Public License v3.0 (GPLv3).<br>
+        MIT License.<br>
         See the LICENSE file for details.<br><br>
 
         <b>Icon credit:</b><br>

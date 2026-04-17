@@ -138,7 +138,7 @@ python -m PyInstaller --onedir --windowed --icon=icons/logo_blue.ico --name="CdA
 
 ## License
 
-Licensed under GPL-3.0. See [LICENSE](LICENSE).
+Licensed under MIT. See [LICENSE](LICENSE).
 
 ## Credits
 
